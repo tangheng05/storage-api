@@ -5,7 +5,7 @@ video path on `upload.serey.io`. Accepts **resumable chunked uploads** via the
 [tus protocol](https://tus.io), validates and remuxes videos with ffmpeg
 (faststart MP4 + thumbnail), and serves them from disk.
 
-Runs on its own Hetzner VPS behind `video.serey.io` via **Nginx Proxy Manager +
+Runs on its own Hetzner VPS behind `storage.serey.io` via **Nginx Proxy Manager +
 the Cloudflare proxy**. The CF Pro proxy caps each request body at 100MB, so
 the frontend uploads in **50MB tus chunks** — large files work because tus
 sends many small PATCH requests. (Heads-up: CF ToS restricts video *playback*

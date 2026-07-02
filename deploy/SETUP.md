@@ -1,4 +1,4 @@
-# VPS Setup Runbook — video.serey.io
+# VPS Setup Runbook — storage.serey.io
 
 Target: fresh Hetzner VPS, Ubuntu 24.04, using **Nginx Proxy Manager (NPM)**
 for TLS/reverse-proxy and the **Cloudflare proxy (orange cloud)** in front.
@@ -62,7 +62,7 @@ Config (systemd reads it from `/etc/serey-storage/.env`):
 mkdir -p /etc/serey-storage
 cat > /etc/serey-storage/.env <<'EOF'
 PORT=8080
-PUBLIC_BASE_URL=https://video.serey.io
+PUBLIC_BASE_URL=https://storage.serey.io
 UPLOAD_API_KEY=<GENERATE: openssl rand -hex 32>
 TUS_DIR=/var/lib/serey-storage/tus
 JOBS_DIR=/var/lib/serey-storage/jobs
@@ -95,17 +95,17 @@ journalctl -u storage-api -f   # check it started
 
 In the Cloudflare dashboard for serey.io:
 
-- Add an **A record**: name `video`, value = VPS public IP, **Proxied (orange
+- Add an **A record**: name `storage`, value = VPS public IP, **Proxied (orange
   cloud)**.
 - SSL/TLS mode: **Full (strict)** once NPM has its certificate.
 - Optional but recommended: Cloudflare → Rules → Cache Rules → *Bypass cache*
-  for `video.serey.io/files/*` (upload traffic should never be cached).
+  for `storage.serey.io/files/*` (upload traffic should never be cached).
 
 ## 7. Nginx Proxy Manager
 
 Create a **Proxy Host**:
 
-- Domain: `video.serey.io`
+- Domain: `storage.serey.io`
 - Forward to: `http://127.0.0.1:8080` (or the app container/IP)
 - SSL tab: request a Let's Encrypt cert — use a **DNS challenge** with your
   Cloudflare API token (HTTP challenge is unreliable behind the CF proxy).
@@ -173,16 +173,16 @@ chmod +x /etc/cron.daily/serey-storage-cleanup
 ## 9. Smoke test
 
 ```bash
-curl https://video.serey.io/health
+curl https://storage.serey.io/health
 # → {"ok":true}
 
-curl -X POST https://video.serey.io/files \
+curl -X POST https://storage.serey.io/files \
   -H "Tus-Resumable: 1.0.0" -H "Upload-Length: 10"
 # → 401 (no key) — auth is working
 ```
 
 Then run a real upload with the frontend snippet below or
-`ENDPOINT=https://video.serey.io UPLOAD_API_KEY=<key> node test/upload-test.js video.mp4`.
+`ENDPOINT=https://storage.serey.io UPLOAD_API_KEY=<key> node test/upload-test.js video.mp4`.
 
 ## Frontend integration (tus-js-client)
 
@@ -193,7 +193,7 @@ const UPLOAD_KEY = import.meta.env.VITE_UPLOAD_API_KEY; // same value as server 
 
 function uploadVideo(file, { onProgress, onReady, onError }) {
   const upload = new tus.Upload(file, {
-    endpoint: 'https://video.serey.io/files',
+    endpoint: 'https://storage.serey.io/files',
     chunkSize: 50 * 1024 * 1024,            // MUST stay < 100MB (Cloudflare Pro cap)
     retryDelays: [0, 3000, 10000, 30000, 60000],
     headers: { 'x-upload-key': UPLOAD_KEY },
@@ -204,7 +204,7 @@ function uploadVideo(file, { onProgress, onReady, onError }) {
       const id = upload.url.split('/').pop();
       // Poll until processing finishes (usually seconds).
       for (;;) {
-        const res = await fetch(`https://video.serey.io/videos/${id}/status`, {
+        const res = await fetch(`https://storage.serey.io/videos/${id}/status`, {
           headers: { 'x-upload-key': UPLOAD_KEY },
         });
         const job = await res.json();
@@ -228,5 +228,5 @@ On `onReady`, send `job.url` (and `job.thumbnail_url`) to serey-api in the post
 body — the same pattern as `image_url` today. serey-api needs no changes.
 
 Note: `getVideoPlatform` in serey-api's `src/utils/general_util.js` detects
-Serey-hosted videos by hostname; add `https://video.serey.io/videos/` to that
+Serey-hosted videos by hostname; add `https://storage.serey.io/videos/` to that
 list so embeds are treated as SEREY videos.
