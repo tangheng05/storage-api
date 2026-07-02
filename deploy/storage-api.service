@@ -1,0 +1,24 @@
+# /etc/systemd/system/storage-api.service
+[Unit]
+Description=Serey Video Storage API
+After=network.target
+
+[Service]
+Type=simple
+User=serey-storage
+Group=serey-storage
+WorkingDirectory=/opt/serey-storage-api
+EnvironmentFile=/etc/serey-storage/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/serey-storage /var/www/serey-videos
+
+[Install]
+WantedBy=multi-user.target
