@@ -28,6 +28,7 @@ module.exports = {
   UPLOAD_EXPIRY_MS: parseInt(process.env.UPLOAD_EXPIRY_MS, 10) || 24 * 60 * 60 * 1000,
 
   ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || '*').split(',').map((s) => s.trim()),
+  TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS, 10) || 2,
   CREATES_PER_HOUR: parseInt(process.env.CREATES_PER_HOUR, 10) || 30,
 
   FFMPEG_PATH: process.env.FFMPEG_PATH || 'ffmpeg',

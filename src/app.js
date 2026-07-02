@@ -10,7 +10,8 @@ const videosRouter = require('./routes/videos');
 
 const app = express();
 
-app.set('trust proxy', 1); // behind nginx
+// Hops in front of node: 2 = Cloudflare proxy + Nginx Proxy Manager.
+app.set('trust proxy', config.TRUST_PROXY_HOPS);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
 

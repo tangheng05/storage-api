@@ -1,19 +1,35 @@
 # VPS Setup Runbook — video.serey.io
 
-Target: fresh Hetzner VPS, Ubuntu 24.04. ~4 vCPU / 8GB is plenty (processing is
-stream-copy remux, I/O-bound). Attach a **Hetzner Volume** mounted at
-`/var/www/serey-videos` from day one — it is resizable, so video storage can
-grow without migrating the server.
+Target: fresh Hetzner VPS, Ubuntu 24.04, using **Nginx Proxy Manager (NPM)**
+for TLS/reverse-proxy and the **Cloudflare proxy (orange cloud)** in front.
+~4 vCPU / 8GB is plenty (processing is stream-copy remux, I/O-bound).
+Attach a **Hetzner Volume** mounted at `/var/www/serey-videos` from day one —
+it is resizable, so video storage can grow without migrating the server.
+
+> **Two Cloudflare constraints on the Pro plan** (both handled below):
+> 1. The CF proxy caps each request body at **100MB** → the frontend must use
+>    a tus `chunkSize` **below 100MB** (we use 50MB). Uploads still work for
+>    files up to 2GB because tus sends many small PATCH requests.
+> 2. Cloudflare's ToS **restricts serving video files through their CDN proxy**
+>    on non-Enterprise plans (video must be on CF Stream/R2). Uploading through
+>    the proxy is fine; it's the *playback* traffic that can trigger
+>    enforcement (throttling or being asked to move). If playback volume gets
+>    meaningful, the safe move is a second hostname for delivery only, set to
+>    DNS-only (grey cloud), e.g. `video-cdn.serey.io` → same VPS. The app
+>    supports this via `PUBLIC_BASE_URL` — no code change needed.
 
 ## 1. Base system
 
 ```bash
 apt update && apt upgrade -y
-apt install -y nginx ffmpeg ufw fail2ban unattended-upgrades
+apt install -y ffmpeg ufw fail2ban unattended-upgrades
 
 ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp
 ufw enable
 ```
+
+(If NPM runs in Docker on this VPS, also install Docker and run the standard
+`jc21/nginx-proxy-manager` compose setup with ports 80/443/81.)
 
 ## 2. Node.js 22 LTS
 
@@ -30,7 +46,6 @@ useradd --system --home /opt/serey-storage-api --shell /usr/sbin/nologin serey-s
 mkdir -p /var/lib/serey-storage/{tus,jobs}
 mkdir -p /var/www/serey-videos/{videos,thumbnails}   # on the Hetzner Volume
 chown -R serey-storage:serey-storage /var/lib/serey-storage /var/www/serey-videos
-chmod 755 /var/www/serey-videos /var/www/serey-videos/videos /var/www/serey-videos/thumbnails
 ```
 
 ## 4. Deploy the app
@@ -58,12 +73,14 @@ MAX_DURATION_SEC=14400
 UPLOAD_EXPIRY_MS=86400000
 ALLOWED_ORIGINS=https://serey.io,https://www.serey.io
 CREATES_PER_HOUR=30
+TRUST_PROXY_HOPS=2
 EOF
 chmod 600 /etc/serey-storage/.env
 ```
 
-The same `UPLOAD_API_KEY` value must be given to every client that uploads
-(frontend/serey-api). Rotate it by changing it here and in the clients.
+Auth is just this one key: put the **same `UPLOAD_API_KEY` value in the
+frontend's .env** and send it as the `x-upload-key` header. Rotate it by
+changing both sides.
 
 ## 5. systemd
 
@@ -78,24 +95,68 @@ journalctl -u storage-api -f   # check it started
 
 In the Cloudflare dashboard for serey.io:
 
-- Add an **A record**: name `video`, value = VPS public IP.
-- Set it to **DNS only (grey cloud)** — NOT proxied. This avoids the 100MB
-  request cap and the ToS restriction on serving video via the CF proxy.
+- Add an **A record**: name `video`, value = VPS public IP, **Proxied (orange
+  cloud)**.
+- SSL/TLS mode: **Full (strict)** once NPM has its certificate.
+- Optional but recommended: Cloudflare → Rules → Cache Rules → *Bypass cache*
+  for `video.serey.io/files/*` (upload traffic should never be cached).
 
-## 7. TLS + nginx
+## 7. Nginx Proxy Manager
 
-```bash
-cp deploy/nginx-video.serey.io.conf /etc/nginx/sites-available/video.serey.io
-ln -s /etc/nginx/sites-available/video.serey.io /etc/nginx/sites-enabled/
+Create a **Proxy Host**:
 
-# Get the cert first (needs DNS already pointing here):
-apt install -y certbot python3-certbot-nginx
-certbot certonly --nginx -d video.serey.io
+- Domain: `video.serey.io`
+- Forward to: `http://127.0.0.1:8080` (or the app container/IP)
+- SSL tab: request a Let's Encrypt cert — use a **DNS challenge** with your
+  Cloudflare API token (HTTP challenge is unreliable behind the CF proxy).
+  Enable "Force SSL".
+- **Advanced tab** — paste this custom config (critical for large uploads and
+  video seeking):
 
-nginx -t && systemctl reload nginx
+```nginx
+# ---- tus uploads: don't buffer, don't cap body size ----
+location /files {
+    proxy_pass http://127.0.0.1:8080;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+
+# ---- published videos + thumbnails straight from disk ----
+# nginx serves Range requests (seeking) natively for static files.
+location /videos/ {
+    root /var/www/serey-videos;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Access-Control-Allow-Origin "*";
+}
+location /thumbnails/ {
+    root /var/www/serey-videos;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Access-Control-Allow-Origin "*";
+}
+
+# ---- API routes (status/delete) back to node ----
+# Regex beats the /videos/ prefix above; API paths have no file extension.
+location ~ ^/videos/[0-9A-HJKMNP-TV-Z]{26}(/status)?$ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 ```
 
-Certbot's systemd timer auto-renews.
+If NPM runs in Docker, mount the video dirs into the NPM container
+(`-v /var/www/serey-videos:/var/www/serey-videos:ro`) so the static
+`location` blocks can read them, and use the host gateway IP instead of
+`127.0.0.1` in `proxy_pass`.
 
 ## 8. Safety-net cleanup cron
 
@@ -120,19 +181,20 @@ curl -X POST https://video.serey.io/files \
 # → 401 (no key) — auth is working
 ```
 
-Then run a real upload with the frontend snippet below or `test/upload-test.js`.
+Then run a real upload with the frontend snippet below or
+`ENDPOINT=https://video.serey.io UPLOAD_API_KEY=<key> node test/upload-test.js video.mp4`.
 
 ## Frontend integration (tus-js-client)
 
 ```js
 import * as tus from 'tus-js-client';
 
-const UPLOAD_KEY = '<same UPLOAD_API_KEY as the server>';
+const UPLOAD_KEY = import.meta.env.VITE_UPLOAD_API_KEY; // same value as server .env
 
 function uploadVideo(file, { onProgress, onReady, onError }) {
   const upload = new tus.Upload(file, {
     endpoint: 'https://video.serey.io/files',
-    chunkSize: 64 * 1024 * 1024,            // grey cloud: no CF 100MB cap
+    chunkSize: 50 * 1024 * 1024,            // MUST stay < 100MB (Cloudflare Pro cap)
     retryDelays: [0, 3000, 10000, 30000, 60000],
     headers: { 'x-upload-key': UPLOAD_KEY },
     metadata: { filename: file.name, filetype: file.type },

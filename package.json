@@ -21,5 +21,8 @@
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "tus-js-client": "^4.3.1"
   }
 }
