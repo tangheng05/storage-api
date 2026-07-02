@@ -29,6 +29,17 @@ const originAllowed = (origin) =>
     return origin === pattern;
   });
 
+// Hard-reject disallowed browser origins before anything else — the cors
+// package only omits headers on deny, and @tus/server's built-in CORS would
+// otherwise reflect any origin on the /files routes.
+app.use((req, res, next) => {
+  const { origin } = req.headers;
+  if (origin && !originAllowed(origin)) {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
+  return next();
+});
+
 const corsOptions = {
   origin: (origin, cb) => cb(null, !origin || originAllowed(origin)),
   methods: ['GET', 'POST', 'PATCH', 'HEAD', 'DELETE', 'OPTIONS'],
