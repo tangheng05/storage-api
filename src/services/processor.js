@@ -9,6 +9,10 @@ const logger = require('./logger');
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
 // vp8/vp9/av1 in webm play and seek fine as-is; everything else goes to MP4.
 const WEBM_CODECS = ['vp8', 'vp9', 'av1'];
+// h264 already plays everywhere — cheap container remux, no re-encode.
+// hevc (iPhone default since iOS 11) has no browser decoder outside Safari,
+// so it needs a real transcode to h264 or it "succeeds" into an unplayable file.
+const TRANSCODE_CODECS = ['hevc'];
 
 function tusFilePath(id) {
   return path.join(config.TUS_DIR, id);
@@ -36,16 +40,21 @@ async function process(id) {
       throw Object.assign(new Error('invalid_duration'), { code: 'invalid_duration' });
     }
 
-    // 2. Publish: webm passes through, everything else remuxed to faststart MP4.
+    // 2. Publish: webm passes through, h264 is remuxed (fast, lossless), and
+    // hevc is transcoded to h264 so it actually plays outside Safari.
     const job = await jobs.get(id);
-    const isWebm = WEBM_CODECS.includes(videoStream.codec_name)
-      && (probe.format.format_name || '').includes('webm');
+    const codec = videoStream.codec_name;
+    const isWebm = WEBM_CODECS.includes(codec) && (probe.format.format_name || '').includes('webm');
+    const needsTranscode = TRANSCODE_CODECS.includes(codec);
     const ext = isWebm ? '.webm' : '.mp4';
     const finalPath = path.join(config.VIDEOS_DIR, `${id}${ext}`);
     const tmpPath = path.join(config.VIDEOS_DIR, `.${id}.tmp${ext}`);
 
     if (isWebm) {
       await fsp.copyFile(src, tmpPath);
+    } else if (needsTranscode) {
+      await jobs.update(id, { state: 'processing', processing_mode: 'transcode' });
+      await ffmpeg.transcodeToH264(src, tmpPath);
     } else {
       await ffmpeg.remuxToMp4(src, tmpPath);
     }
