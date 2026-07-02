@@ -15,8 +15,22 @@ app.set('trust proxy', config.TRUST_PROXY_HOPS);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
 
+// ALLOWED_ORIGINS entries may be exact origins, wildcard-subdomain patterns
+// ("https://*.serey.io"), or "*" for any origin. Communities live on many
+// subdomains (bookclub.serey.io, khmer.serey.io, ...), so exact-only broke them.
+const originAllowed = (origin) =>
+  config.ALLOWED_ORIGINS.some((pattern) => {
+    if (pattern === '*') return true;
+    if (pattern.startsWith('https://*.')) {
+      const suffix = pattern.slice('https://*'.length); // ".serey.io"
+      return origin.startsWith('https://') && origin.endsWith(suffix)
+        && !origin.slice('https://'.length, -suffix.length).includes('/');
+    }
+    return origin === pattern;
+  });
+
 const corsOptions = {
-  origin: config.ALLOWED_ORIGINS.includes('*') ? true : config.ALLOWED_ORIGINS,
+  origin: (origin, cb) => cb(null, !origin || originAllowed(origin)),
   methods: ['GET', 'POST', 'PATCH', 'HEAD', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
