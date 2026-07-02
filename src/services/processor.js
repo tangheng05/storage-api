@@ -18,6 +18,19 @@ function tusFilePath(id) {
   return path.join(config.TUS_DIR, id);
 }
 
+// One retry for the ffmpeg publish step. A corrupt input fails identically both
+// times (still rejected), but a transient hiccup (I/O stall, OOM-killed ffmpeg,
+// timeout under load) shouldn't permanently fail a fully-uploaded video.
+async function withOneRetry(id, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    logger.warn({ id, err: err.message }, 'ffmpeg failed, retrying once');
+    await new Promise((r) => setTimeout(r, 5000));
+    await fn();
+  }
+}
+
 async function process(id) {
   const src = tusFilePath(id);
   try {
@@ -54,9 +67,9 @@ async function process(id) {
       await fsp.copyFile(src, tmpPath);
     } else if (needsTranscode) {
       await jobs.update(id, { state: 'processing', processing_mode: 'transcode' });
-      await ffmpeg.transcodeToH264(src, tmpPath);
+      await withOneRetry(id, () => ffmpeg.transcodeToH264(src, tmpPath));
     } else {
-      await ffmpeg.remuxToMp4(src, tmpPath);
+      await withOneRetry(id, () => ffmpeg.remuxToMp4(src, tmpPath));
     }
     await fsp.rename(tmpPath, finalPath);
 
