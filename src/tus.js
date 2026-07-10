@@ -96,6 +96,9 @@ const tusServer = new Server({
       filetype: meta.filetype,
       size: upload.size,
       upload_token: uploadToken,
+      // Verified username set by the trusted caller (only master-key holders
+      // can create uploads). DELETE enforces it via x-delete-owner.
+      owner: meta.owner || null,
     });
     res.setHeader('X-Upload-Token', uploadToken);
     return res;

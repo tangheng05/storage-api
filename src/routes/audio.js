@@ -37,6 +37,14 @@ router.delete('/:id', requireUploadKey, validateId, async (req, res, next) => {
     const { id } = req.params;
     const job = await jobs.get(id);
     if (!job) return res.status(404).json({ error: 'Not found' });
+    // User-driven deletes (proxied by the frontend backend) carry the
+    // verified requester in x-delete-owner; a job that records a different
+    // owner is off-limits — ids are public, login alone isn't enough.
+    // Direct master-key calls without the header (admin/ops) are unrestricted.
+    const requester = req.headers['x-delete-owner'];
+    if (requester && job.owner && requester !== job.owner) {
+      return res.status(403).json({ error: 'Not the owner of this audio file' });
+    }
     await Promise.all([
       fsp.rm(path.join(config.AUDIO_DIR, `${id}.m4a`), { force: true }),
       fsp.rm(path.join(config.TUS_DIR, id), { force: true }),
