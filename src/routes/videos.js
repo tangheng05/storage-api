@@ -3,7 +3,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const config = require('../config');
 const jobs = require('../services/jobs');
-const { requireUploadKey } = require('../middleware/auth');
+const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -14,9 +14,16 @@ function validateId(req, res, next) {
   return next();
 }
 
-router.get('/:id/status', requireUploadKey, validateId, async (req, res, next) => {
+// Status may be read with the master key OR the per-upload scoped token the
+// uploader received at creation (see src/tus.js), so browsers/apps can poll
+// directly without holding the master key. Unauthenticated callers get 401
+// regardless of whether the id exists, to avoid leaking which ids are real.
+router.get('/:id/status', validateId, async (req, res, next) => {
   try {
     const job = await jobs.get(req.params.id);
+    if (!isAuthorized(req) && !(job && matchesUploadToken(req, job.upload_token))) {
+      return res.status(401).json({ error: 'Invalid or missing upload key' });
+    }
     if (!job) return res.status(404).json({ error: 'Not found' });
     const { id, state, url, thumbnail_url, error, duration_sec, width, height, filename } = job;
     return res.json({ id, state, url, thumbnail_url, error, duration_sec, width, height, filename });
