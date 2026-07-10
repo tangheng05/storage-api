@@ -2,7 +2,7 @@ const fs = require('fs');
 const config = require('./config');
 const logger = require('./services/logger');
 
-[config.TUS_DIR, config.JOBS_DIR, config.VIDEOS_DIR, config.THUMBS_DIR].forEach((dir) => {
+[config.TUS_DIR, config.JOBS_DIR, config.VIDEOS_DIR, config.THUMBS_DIR, config.AUDIO_DIR].forEach((dir) => {
   fs.mkdirSync(dir, { recursive: true });
 });
 

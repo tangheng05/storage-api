@@ -61,6 +61,22 @@ async function transcodeToH264(srcPath, destPath) {
   ], 30 * 60 * 1000);
 }
 
+// Re-encode any input audio to AAC in an M4A container for universal browser
+// support and consistent behavior, same rationale as HEVC->H.264 for video.
+async function transcodeToAac(srcPath, destPath) {
+  await run(config.FFMPEG_PATH, [
+    '-y',
+    '-i', srcPath,
+    '-map', '0:a:0',
+    '-vn',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-movflags', '+faststart',
+    '-f', 'mp4',
+    destPath,
+  ], 30 * 60 * 1000);
+}
+
 async function makeThumbnail(srcPath, destPath, atSeconds) {
   await run(config.FFMPEG_PATH, [
     '-y',
@@ -73,4 +89,4 @@ async function makeThumbnail(srcPath, destPath, atSeconds) {
   ], 60 * 1000);
 }
 
-module.exports = { probe, remuxToMp4, transcodeToH264, makeThumbnail };
+module.exports = { probe, remuxToMp4, transcodeToH264, transcodeToAac, makeThumbnail };

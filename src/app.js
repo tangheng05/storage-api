@@ -7,6 +7,7 @@ const config = require('./config');
 const logger = require('./services/logger');
 const tusServer = require('./tus');
 const videosRouter = require('./routes/videos');
+const audioRouter = require('./routes/audio');
 
 const app = express();
 
@@ -89,10 +90,12 @@ app.all('/files/*', (req, res) => tusServer.handle(req, res));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 app.use('/videos', videosRouter);
+app.use('/audio', audioRouter);
 
 // Local/dev fallback: in production nginx serves these directly from disk.
 app.use('/videos', express.static(config.VIDEOS_DIR, { immutable: true, maxAge: '365d' }));
 app.use('/thumbnails', express.static(config.THUMBS_DIR, { immutable: true, maxAge: '365d' }));
+app.use('/audio', express.static(config.AUDIO_DIR, { immutable: true, maxAge: '365d' }));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 // eslint-disable-next-line no-unused-vars

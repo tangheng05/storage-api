@@ -22,9 +22,11 @@ module.exports = {
   JOBS_DIR: resolveDir(process.env.JOBS_DIR, './data/jobs'),
   VIDEOS_DIR: resolveDir(process.env.VIDEOS_DIR, './data/videos'),
   THUMBS_DIR: resolveDir(process.env.THUMBS_DIR, './data/thumbnails'),
+  AUDIO_DIR: resolveDir(process.env.AUDIO_DIR, './data/audio'),
 
   MAX_UPLOAD_BYTES: parseInt(process.env.MAX_UPLOAD_BYTES, 10) || 2 * 1024 * 1024 * 1024,
   MAX_DURATION_SEC: parseInt(process.env.MAX_DURATION_SEC, 10) || 14400,
+  MAX_AUDIO_DURATION_SEC: parseInt(process.env.MAX_AUDIO_DURATION_SEC, 10) || 14400,
   UPLOAD_EXPIRY_MS: parseInt(process.env.UPLOAD_EXPIRY_MS, 10) || 24 * 60 * 60 * 1000,
 
   ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || '*').split(',').map((s) => s.trim()),
