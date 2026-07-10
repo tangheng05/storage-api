@@ -1,10 +1,11 @@
 const path = require('path');
+const crypto = require('crypto');
 const { checkDiskSpace } = require('./utils/disk');
 const { Server } = require('@tus/server');
 const { FileStore } = require('@tus/file-store');
 const { ulid } = require('ulid');
 const config = require('./config');
-const { isAuthorized } = require('./middleware/auth');
+const { isAuthorized, matchesUploadToken } = require('./middleware/auth');
 const jobs = require('./services/jobs');
 const processor = require('./services/processor');
 
@@ -48,9 +49,19 @@ const tusServer = new Server({
 
   async onIncomingRequest(req, res, uploadId) {
     if (req.method === 'OPTIONS') return;
-    if (!isAuthorized(req)) {
-      throw { status_code: 401, body: 'Invalid or missing upload key' };
+    if (isAuthorized(req)) return;
+    // POST (creating a new upload) has no uploadId yet and always requires the
+    // master key — only trusted server-to-server callers may create uploads.
+    // PATCH/HEAD on an existing upload may instead present the scoped token
+    // handed out at creation time (see onUploadCreate below), so browsers can
+    // PATCH chunks directly here without ever holding the master key.
+    if (uploadId) {
+      const job = await jobs.get(uploadId);
+      if (job && job.state === 'uploading' && matchesUploadToken(req, job.upload_token)) {
+        return;
+      }
     }
+    throw { status_code: 401, body: 'Invalid or missing upload key' };
   },
 
   async onUploadCreate(req, res, upload) {
@@ -74,13 +85,19 @@ const tusServer = new Server({
     if (free !== null && free < upload.size * 2 + 5 * 1024 * 1024 * 1024) {
       throw { status_code: 507, body: 'Insufficient storage, try again later' };
     }
+    // Scoped to this one upload id — lets the browser PATCH chunks directly
+    // to this endpoint without ever holding the master UPLOAD_API_KEY.
+    // Only valid while the job is still 'uploading' (see onIncomingRequest).
+    const uploadToken = crypto.randomBytes(24).toString('hex');
     await jobs.create(upload.id, {
       state: 'uploading',
       media_type: mediaType,
       filename: meta.filename,
       filetype: meta.filetype,
       size: upload.size,
+      upload_token: uploadToken,
     });
+    res.setHeader('X-Upload-Token', uploadToken);
     return res;
   },
 
