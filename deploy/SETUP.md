@@ -103,6 +103,23 @@ In the Cloudflare dashboard for serey.io:
 
 ## 7. Nginx Proxy Manager
 
+> **Reality check for the current deployment (storage.serey.io):** the NPM
+> "Custom Nginx Configuration" (Advanced) box is **empty**, and NPM forwards
+> everything to the app. Media is therefore served by `express.static` in
+> `src/app.js`, not by nginx from disk. Verified: an existing file returns 206
+> with `Accept-Ranges: bytes`, a missing one returns the app's JSON 404.
+>
+> That means **none of the `location` blocks below are currently applied**, and
+> paywalled media needs no NPM change at all — set `USE_X_ACCEL=false` and
+> Express serves private files through `/media/` after checking the signature.
+> The private dirs have no `express.static` mount, so nothing else can reach
+> them.
+>
+> The blocks below are the intended setup if static serving is ever moved to
+> nginx for performance. Only then set `USE_X_ACCEL=true` and add the
+> `/media/`, `/internal-media/` and `/private/` locations.
+
+
 Create a **Proxy Host**:
 
 - Domain: `storage.serey.io`
@@ -151,12 +168,52 @@ location ~ ^/videos/[0-9A-HJKMNP-TV-Z]{26}(/status)?$ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
+
+# ---- paywalled media: signed delivery ----
+# The app checks the signature, then hands off with X-Accel-Redirect so nginx
+# still streams from disk. proxy_buffering must stay off or video accumulates
+# in a buffer instead of streaming.
+location /media/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+}
+
+# Reachable ONLY through X-Accel-Redirect from the app; nginx refuses a direct
+# request. This is what keeps premium files off the public web.
+location /internal-media/ {
+    internal;
+    alias /var/www/serey-videos/private/;
+    add_header Cache-Control "private, no-store" always;
+}
+
+# Belt and braces: never serve the private tree directly, whatever else changes.
+location /private/ {
+    deny all;
+    return 404;
+}
 ```
 
 If NPM runs in Docker, mount the video dirs into the NPM container
 (`-v /var/www/serey-videos:/var/www/serey-videos:ro`) so the static
 `location` blocks can read them, and use the host gateway IP instead of
-`127.0.0.1` in `proxy_pass`.
+`127.0.0.1` in `proxy_pass` (in the `/media/` block too, not just `/files`).
+
+That one mount already covers `/var/www/serey-videos/private/`, so
+`/internal-media/` needs nothing extra. Read-only is correct: nginx only reads,
+and the public/private move is done by the app on the host, not by nginx.
+
+Verify the private tree is genuinely unreachable after applying this — a plain
+request must 403/404 even though the file exists:
+
+```bash
+curl -sI https://storage.serey.io/private/videos/<ulid>.mp4   # expect 404
+curl -sI https://storage.serey.io/media/videos/<ulid>.mp4     # expect 403 (unsigned)
+```
 
 ## 8. Safety-net cleanup cron
 

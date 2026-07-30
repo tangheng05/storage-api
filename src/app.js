@@ -8,6 +8,7 @@ const logger = require('./services/logger');
 const tusServer = require('./tus');
 const videosRouter = require('./routes/videos');
 const audioRouter = require('./routes/audio');
+const mediaRouter = require('./routes/media');
 
 const app = express();
 
@@ -89,6 +90,10 @@ app.all('/files', (req, res) => tusServer.handle(req, res));
 app.all('/files/*', (req, res) => tusServer.handle(req, res));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+// Signed delivery + visibility changes for paywalled media. Mounted before the
+// static fallbacks so nothing under /media is ever served unauthenticated.
+app.use('/media', express.json({ limit: '8kb' }), mediaRouter);
+
 app.use('/videos', videosRouter);
 app.use('/audio', audioRouter);
 

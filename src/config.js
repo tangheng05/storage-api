@@ -24,6 +24,33 @@ module.exports = {
   THUMBS_DIR: resolveDir(process.env.THUMBS_DIR, './data/thumbnails'),
   AUDIO_DIR: resolveDir(process.env.AUDIO_DIR, './data/audio'),
 
+  // Paywalled media. nginx must NOT map these publicly — they are reachable only
+  // through /media/... with a valid signature. Kept as sibling dirs of the public
+  // ones so a visibility change is a rename on the same filesystem, not a copy.
+  PRIVATE_VIDEOS_DIR: resolveDir(
+    process.env.PRIVATE_VIDEOS_DIR,
+    './data/private/videos',
+  ),
+  PRIVATE_AUDIO_DIR: resolveDir(
+    process.env.PRIVATE_AUDIO_DIR,
+    './data/private/audio',
+  ),
+
+  // Shared with serey-api, which mints the signatures. Empty means signed
+  // delivery is unconfigured and /media/... will refuse to serve anything.
+  MEDIA_SIGNING_SECRET: process.env.MEDIA_SIGNING_SECRET || '',
+  // How long a minted URL stays valid. Short enough that a copied link is close
+  // to useless, long enough to watch a whole video without the src expiring
+  // mid-playback (range requests re-fetch with the same query string).
+  MEDIA_URL_TTL_SEC: parseInt(process.env.MEDIA_URL_TTL_SEC, 10) || 6 * 60 * 60,
+  // In production nginx streams the bytes after we authorize, via an internal
+  // location. Off locally, where Express reads the file itself.
+  USE_X_ACCEL: process.env.USE_X_ACCEL === 'true',
+  X_ACCEL_PREFIX: (process.env.X_ACCEL_PREFIX || '/internal-media').replace(
+    /\/$/,
+    '',
+  ),
+
   MAX_UPLOAD_BYTES: parseInt(process.env.MAX_UPLOAD_BYTES, 10) || 2 * 1024 * 1024 * 1024,
   MAX_DURATION_SEC: parseInt(process.env.MAX_DURATION_SEC, 10) || 14400,
   MAX_AUDIO_DURATION_SEC: parseInt(process.env.MAX_AUDIO_DURATION_SEC, 10) || 14400,
