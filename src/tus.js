@@ -34,6 +34,35 @@ const ALLOWED_AUDIO_TYPES = [
 ];
 const ALLOWED_AUDIO_EXT = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac'];
 
+// Everything sharp's bundled libvips can decode, minus two deliberate omissions:
+//   BMP  — not in the prebuilt libvips (needs the magick loader), so accepting
+//          it here would mean a clean 415 at create time turning into a much
+//          more confusing 'not_an_image' failure after a full upload.
+//   SVG  — it is a script-bearing document, not a photo. Rasterising untrusted
+//          SVG is an attack surface, and flattening it to WebP throws away the
+//          only reason to use it.
+const ALLOWED_IMAGE_TYPES = [
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/tiff',
+  'image/avif',
+  // iPhone default since iOS 11. sharp's prebuilt libvips decodes these, so
+  // unlike HEVC video they need no transcode toolchain of their own.
+  'image/heic',
+  'image/heif',
+  'image/heic-sequence',
+  'image/heif-sequence',
+];
+const ALLOWED_IMAGE_EXT = [
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff', '.avif', '.heic', '.heif',
+];
+
+// Which status route X-Status-Url should point the uploader at.
+const STATUS_PATHS = { video: 'videos', audio: 'audio', image: 'images' };
+
 const tusServer = new Server({
   path: '/files',
   respectForwardedHeaders: true,
@@ -69,18 +98,32 @@ const tusServer = new Server({
     const ext = path.extname(meta.filename || '').toLowerCase();
     const isVideo = ALLOWED_VIDEO_TYPES.includes(meta.filetype) && ALLOWED_VIDEO_EXT.includes(ext);
     const isAudio = ALLOWED_AUDIO_TYPES.includes(meta.filetype) && ALLOWED_AUDIO_EXT.includes(ext);
-    if (!isVideo && !isAudio) {
+    const isImage = ALLOWED_IMAGE_TYPES.includes(meta.filetype) && ALLOWED_IMAGE_EXT.includes(ext);
+    if (!isVideo && !isAudio && !isImage) {
       throw {
         status_code: 415,
-        body: 'Unsupported file type. Allowed video: mp4, mov, mkv, webm, avi. Allowed audio: mp3, wav, m4a, aac, ogg, opus, flac',
+        body: 'Unsupported file type. Allowed video: mp4, mov, mkv, webm, avi. Allowed audio: mp3, wav, m4a, aac, ogg, opus, flac. Allowed image: jpg, png, webp, gif, tiff, avif, heic',
       };
     }
     if (!upload.size) {
       throw { status_code: 400, body: 'Upload-Length is required (deferred length not supported)' };
     }
-    const mediaType = isVideo ? 'video' : 'audio';
+    let mediaType = 'video';
+    if (isAudio) mediaType = 'audio';
+    if (isImage) mediaType = 'image';
+    // The tus store's global maxSize is sized for video, so the much tighter
+    // image limit is enforced here — at create time, before a single byte is
+    // sent, rather than after a 200MB upload has already crossed the wire.
+    if (isImage && upload.size > config.MAX_IMAGE_BYTES) {
+      throw {
+        status_code: 413,
+        body: `Image too large (max ${Math.floor(config.MAX_IMAGE_BYTES / (1024 * 1024))}MB)`,
+      };
+    }
     // Remux/transcode needs roughly 2x the file size transiently; keep a safety margin.
-    const publishDir = isVideo ? config.VIDEOS_DIR : config.AUDIO_DIR;
+    let publishDir = config.VIDEOS_DIR;
+    if (isAudio) publishDir = config.AUDIO_DIR;
+    if (isImage) publishDir = config.IMAGES_DIR;
     const free = await checkDiskSpace(publishDir);
     if (free !== null && free < upload.size * 2 + 5 * 1024 * 1024 * 1024) {
       throw { status_code: 507, body: 'Insufficient storage, try again later' };
@@ -106,8 +149,8 @@ const tusServer = new Server({
 
   async onUploadFinish(req, res, upload) {
     const job = await jobs.update(upload.id, { state: 'queued' });
-    processor.enqueue(upload.id);
-    const statusPath = job.media_type === 'audio' ? 'audio' : 'videos';
+    processor.enqueue(upload.id, job.media_type);
+    const statusPath = STATUS_PATHS[job.media_type] || 'videos';
     return {
       res,
       status_code: 204,

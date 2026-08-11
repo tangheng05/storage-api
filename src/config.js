@@ -23,6 +23,7 @@ module.exports = {
   VIDEOS_DIR: resolveDir(process.env.VIDEOS_DIR, './data/videos'),
   THUMBS_DIR: resolveDir(process.env.THUMBS_DIR, './data/thumbnails'),
   AUDIO_DIR: resolveDir(process.env.AUDIO_DIR, './data/audio'),
+  IMAGES_DIR: resolveDir(process.env.IMAGES_DIR, './data/images'),
 
   // Paywalled media. nginx must NOT map these publicly — they are reachable only
   // through /media/... with a valid signature. Kept as sibling dirs of the public
@@ -34,6 +35,10 @@ module.exports = {
   PRIVATE_AUDIO_DIR: resolveDir(
     process.env.PRIVATE_AUDIO_DIR,
     './data/private/audio',
+  ),
+  PRIVATE_IMAGES_DIR: resolveDir(
+    process.env.PRIVATE_IMAGES_DIR,
+    './data/private/images',
   ),
 
   // Shared with serey-api, which mints the signatures. Empty means signed
@@ -55,6 +60,16 @@ module.exports = {
   MAX_DURATION_SEC: parseInt(process.env.MAX_DURATION_SEC, 10) || 14400,
   MAX_AUDIO_DURATION_SEC: parseInt(process.env.MAX_AUDIO_DURATION_SEC, 10) || 14400,
   UPLOAD_EXPIRY_MS: parseInt(process.env.UPLOAD_EXPIRY_MS, 10) || 24 * 60 * 60 * 1000,
+
+  // Images are capped far below MAX_UPLOAD_BYTES: tus's global maxSize is sized
+  // for video, so the per-type limit is enforced in onUploadCreate instead.
+  MAX_IMAGE_BYTES: parseInt(process.env.MAX_IMAGE_BYTES, 10) || 20 * 1024 * 1024,
+  // Long-edge cap. A 20MB upload can be 10000px wide; publishing that to a feed
+  // wastes bandwidth for no visible gain. Smaller images are never upscaled.
+  MAX_IMAGE_DIMENSION: parseInt(process.env.MAX_IMAGE_DIMENSION, 10) || 2560,
+  IMAGE_WEBP_QUALITY: parseInt(process.env.IMAGE_WEBP_QUALITY, 10) || 82,
+  // Guards against decompression bombs: a few-KB PNG can expand to gigapixels.
+  MAX_IMAGE_PIXELS: parseInt(process.env.MAX_IMAGE_PIXELS, 10) || 100 * 1000 * 1000,
 
   ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || '*').split(',').map((s) => s.trim()),
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS, 10) || 2,

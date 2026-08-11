@@ -8,6 +8,7 @@ const logger = require('./services/logger');
 const tusServer = require('./tus');
 const videosRouter = require('./routes/videos');
 const audioRouter = require('./routes/audio');
+const imagesRouter = require('./routes/images');
 const mediaRouter = require('./routes/media');
 
 const app = express();
@@ -96,11 +97,13 @@ app.use('/media', express.json({ limit: '8kb' }), mediaRouter);
 
 app.use('/videos', videosRouter);
 app.use('/audio', audioRouter);
+app.use('/images', imagesRouter);
 
 // Local/dev fallback: in production nginx serves these directly from disk.
 app.use('/videos', express.static(config.VIDEOS_DIR, { immutable: true, maxAge: '365d' }));
 app.use('/thumbnails', express.static(config.THUMBS_DIR, { immutable: true, maxAge: '365d' }));
 app.use('/audio', express.static(config.AUDIO_DIR, { immutable: true, maxAge: '365d' }));
+app.use('/images', express.static(config.IMAGES_DIR, { immutable: true, maxAge: '365d' }));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 // eslint-disable-next-line no-unused-vars

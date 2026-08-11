@@ -44,7 +44,10 @@ apt install -y nodejs
 useradd --system --home /opt/serey-storage-api --shell /usr/sbin/nologin serey-storage
 
 mkdir -p /var/lib/serey-storage/{tus,jobs}
-mkdir -p /var/www/serey-videos/{videos,thumbnails}   # on the Hetzner Volume
+mkdir -p /var/www/serey-videos/{videos,thumbnails,audio,images}   # on the Hetzner Volume
+# Paywalled media. nginx must NOT serve these publicly — they are reachable
+# only through /media/... with a valid signature (see section on nginx below).
+mkdir -p /var/www/serey-videos/private/{videos,audio,images}
 chown -R serey-storage:serey-storage /var/lib/serey-storage /var/www/serey-videos
 ```
 
@@ -55,6 +58,11 @@ git clone <this-repo> /opt/serey-storage-api
 cd /opt/serey-storage-api && npm ci --omit=dev
 chown -R serey-storage:serey-storage /opt/serey-storage-api
 ```
+
+Image conversion uses **sharp**, which ships prebuilt libvips binaries for
+linux-x64 — `npm ci` pulls them automatically and there is nothing extra to
+`apt install`. HEIC/HEIF and AVIF decoding are bundled too, so iPhone photos
+work out of the box (unlike HEVC *video*, which needs the ffmpeg toolchain).
 
 Config (systemd reads it from `/etc/serey-storage/.env`):
 
@@ -68,8 +76,12 @@ TUS_DIR=/var/lib/serey-storage/tus
 JOBS_DIR=/var/lib/serey-storage/jobs
 VIDEOS_DIR=/var/www/serey-videos/videos
 THUMBS_DIR=/var/www/serey-videos/thumbnails
+AUDIO_DIR=/var/www/serey-videos/audio
+IMAGES_DIR=/var/www/serey-videos/images
 MAX_UPLOAD_BYTES=2147483648
 MAX_DURATION_SEC=14400
+MAX_IMAGE_BYTES=20971520
+MAX_IMAGE_DIMENSION=2560
 UPLOAD_EXPIRY_MS=86400000
 ALLOWED_ORIGINS=https://serey.io,https://www.serey.io
 CREATES_PER_HOUR=30

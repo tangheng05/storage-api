@@ -4,6 +4,7 @@ const config = require('../config');
 const jobs = require('./jobs');
 const queue = require('./queue');
 const ffmpeg = require('./ffmpeg');
+const image = require('./image');
 const logger = require('./logger');
 
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
@@ -108,24 +109,71 @@ async function processAudio(id, src, probe) {
   logger.info({ id, duration }, 'audio ready');
 }
 
+async function processImage(id, src, meta) {
+  // limitInputPixels already refuses bombs at decode time; checking the declared
+  // dimensions first turns that into a clean error code instead of a raw throw.
+  if (meta.width * meta.height > config.MAX_IMAGE_PIXELS) {
+    throw Object.assign(new Error('image_too_large'), { code: 'image_too_large' });
+  }
+
+  // Unconditional conversion to WebP, same rationale as audio->AAC: one output
+  // format everywhere beats carrying a dozen input formats through the stack.
+  const job = await jobs.get(id);
+  const ext = '.webp';
+  const finalPath = path.join(config.IMAGES_DIR, `${id}${ext}`);
+  const tmpPath = path.join(config.IMAGES_DIR, `.${id}.tmp${ext}`);
+
+  try {
+    await withOneRetry(id, () => image.toWebp(src, tmpPath, meta));
+    await fsp.rename(tmpPath, finalPath);
+  } finally {
+    // No-op after a successful rename; cleans up a half-written file otherwise.
+    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+  }
+
+  // Report what we actually published — the long-edge cap and the EXIF rotation
+  // both change this from the uploaded dimensions.
+  const { width, height } = await image.publishedSize(finalPath);
+
+  await jobs.update(id, {
+    state: 'ready',
+    url: `${config.PUBLIC_BASE_URL}/images/${id}${ext}`,
+    width,
+    height,
+    filename: job && job.filename,
+  });
+  logger.info({ id, width, height, from: meta.format }, 'image ready');
+}
+
 async function process(id) {
   const src = tusFilePath(id);
   try {
     const job = await jobs.get(id);
     await jobs.update(id, { state: 'processing' });
 
-    // Validate it is a real, playable media file.
-    let probe;
-    try {
-      probe = await ffmpeg.probe(src);
-    } catch {
-      throw Object.assign(new Error('not_a_media_file'), { code: 'not_a_media_file' });
-    }
-
-    if (job && job.media_type === 'audio') {
-      await processAudio(id, src, probe);
+    if (job && job.media_type === 'image') {
+      // sharp reads the header itself; ffprobe is not involved for images.
+      let meta;
+      try {
+        meta = await image.probe(src);
+      } catch {
+        throw Object.assign(new Error('not_an_image'), { code: 'not_an_image' });
+      }
+      await processImage(id, src, meta);
     } else {
-      await processVideo(id, src, probe);
+      // Validate it is a real, playable media file.
+      let probe;
+      try {
+        probe = await ffmpeg.probe(src);
+      } catch {
+        throw Object.assign(new Error('not_a_media_file'), { code: 'not_a_media_file' });
+      }
+
+      if (job && job.media_type === 'audio') {
+        await processAudio(id, src, probe);
+      } else {
+        await processVideo(id, src, probe);
+      }
     }
 
     // Cleanup tus temp files.
@@ -139,8 +187,12 @@ async function process(id) {
   }
 }
 
-function enqueue(id) {
-  queue.push(() => process(id));
+// media_type picks the lane, so a 200ms image conversion never waits behind a
+// 30-minute HEVC transcode. Every caller already holds the job, so passing the
+// type in keeps this synchronous.
+function enqueue(id, mediaType) {
+  const lane = mediaType === 'image' ? queue.IMAGE_LANE : queue.MEDIA_LANE;
+  queue.push(() => process(id), lane);
 }
 
 // Re-enqueue jobs interrupted by a crash/restart. Uploads still in
@@ -148,8 +200,8 @@ function enqueue(id) {
 function recoverOnBoot() {
   const stuck = jobs.listByState(['queued', 'processing']);
   stuck.forEach((job) => {
-    logger.info({ id: job.id }, 'recovering interrupted job');
-    enqueue(job.id);
+    logger.info({ id: job.id, media_type: job.media_type }, 'recovering interrupted job');
+    enqueue(job.id, job.media_type);
   });
 }
 

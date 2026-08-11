@@ -10,11 +10,14 @@ const { verify } = require('../utils/signed_url');
 
 const router = express.Router();
 
-// Only these two kinds have a private counterpart. Thumbnails stay public on
-// purpose: a locked card still shows its poster.
+// Only these kinds have a private counterpart. Video *thumbnails* stay public
+// on purpose: a locked card still shows its poster. Uploaded images do not get
+// that exemption — an image is the content on an image post, so leaving it
+// public would hand away the very thing the paywall is protecting.
 const KINDS = {
   videos: { public: config.VIDEOS_DIR, private: config.PRIVATE_VIDEOS_DIR },
   audio: { public: config.AUDIO_DIR, private: config.PRIVATE_AUDIO_DIR },
+  images: { public: config.IMAGES_DIR, private: config.PRIVATE_IMAGES_DIR },
 };
 
 // <ULID><ext>. Anchored, and the extension cannot contain a dot or slash, so a

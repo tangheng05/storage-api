@@ -1,10 +1,10 @@
-# Serey Video Storage API
+# Serey Media Storage API
 
-Dedicated video/audio upload/storage service for Serey, replacing the
+Dedicated video/audio/image upload/storage service for Serey, replacing the
 15MB-limited video path on `upload.serey.io`. Accepts **resumable chunked
-uploads** via the [tus protocol](https://tus.io), validates and
-remuxes/transcodes media with ffmpeg (faststart MP4 + thumbnail for video,
-AAC/M4A for audio), and serves them from disk.
+uploads** via the [tus protocol](https://tus.io), normalises the media
+(faststart MP4 + thumbnail for video via ffmpeg, AAC/M4A for audio via ffmpeg,
+WebP for images via sharp), and serves the results from disk.
 
 Runs on its own Hetzner VPS behind `storage.serey.io` via **Nginx Proxy Manager +
 the Cloudflare proxy**. The CF Pro proxy caps each request body at 100MB, so
@@ -45,12 +45,19 @@ x-upload-key: <UPLOAD_API_KEY>
 | DELETE | `/videos/:id` | Remove a video + thumbnail |
 | GET | `/audio/:id/status` | `{ state: uploading\|queued\|processing\|ready\|failed, url?, error? }` |
 | DELETE | `/audio/:id` | Remove an audio file |
+| GET | `/images/:id/status` | `{ state: uploading\|queued\|processing\|ready\|failed, url?, width?, height?, error? }` |
+| DELETE | `/images/:id` | Remove an image |
 | GET | `/health` | Liveness check (no auth) |
-| GET | `/videos/:id.mp4`, `/thumbnails/:id.jpg`, `/audio/:id.m4a` | Public files (nginx in prod) |
+| GET | `/videos/:id.mp4`, `/thumbnails/:id.jpg`, `/audio/:id.m4a`, `/images/:id.webp` | Public files (nginx in prod) |
 
-Limits: 2GB per file, 30 new uploads per IP per hour.
+Limits: 2GB per file (**20MB for images**), 30 new uploads per IP per hour.
 - Video: mp4/mov/mkv/webm/avi only, ffprobe-validated (h264/hevc/vp8/vp9/av1).
 - Audio: mp3/wav/m4a/aac/ogg/opus/flac, always transcoded to AAC/M4A.
+- Image: jpg/png/webp/gif/tiff/avif/heic, always converted to WebP, long edge
+  capped at 2560px. EXIF orientation is applied to the pixels (so phone photos
+  are upright) and the rest of the EXIF — including GPS — is dropped. Animated
+  GIFs stay animated. BMP and SVG are rejected: BMP isn't in sharp's bundled
+  libvips, and rasterising untrusted SVG is an attack surface.
 
 ## Run locally
 

@@ -8,8 +8,10 @@ const logger = require('./services/logger');
   config.VIDEOS_DIR,
   config.THUMBS_DIR,
   config.AUDIO_DIR,
+  config.IMAGES_DIR,
   config.PRIVATE_VIDEOS_DIR,
   config.PRIVATE_AUDIO_DIR,
+  config.PRIVATE_IMAGES_DIR,
 ].forEach((dir) => {
   fs.mkdirSync(dir, { recursive: true });
 });
