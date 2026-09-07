@@ -15,6 +15,11 @@ const logger = require('./logger');
 
 const MEDIA_LANE = 'media'; // ffmpeg: video remux/transcode, audio transcode
 const IMAGE_LANE = 'image'; // sharp: fast, must not wait behind the above
+// Retrying Sia uploads that failed earlier. Network I/O, not CPU, and purely
+// background durability work — it must never sit in front of a live upload, nor
+// be held up by a transcode. The publish-time upload is NOT on this lane; that
+// one runs inline because the job's final URL depends on it.
+const SIA_LANE = 'sia';
 
 const lanes = new Map();
 
@@ -48,4 +53,5 @@ module.exports = {
   size: (name = MEDIA_LANE) => laneFor(name).tasks.length,
   MEDIA_LANE,
   IMAGE_LANE,
+  SIA_LANE,
 };

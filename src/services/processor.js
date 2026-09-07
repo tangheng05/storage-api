@@ -5,6 +5,7 @@ const jobs = require('./jobs');
 const queue = require('./queue');
 const ffmpeg = require('./ffmpeg');
 const image = require('./image');
+const mirror = require('./mirror');
 const logger = require('./logger');
 
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
@@ -17,6 +18,15 @@ const TRANSCODE_CODECS = ['hevc'];
 
 function tusFilePath(id) {
   return path.join(config.TUS_DIR, id);
+}
+
+async function exists(p) {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // One retry for the ffmpeg publish step. A corrupt input fails identically both
@@ -71,16 +81,44 @@ async function processVideo(id, src, probe) {
     logger.warn({ id, err: err.message }, 'thumbnail generation failed');
   }
 
+  // Inert until 'video' is added to SIA_MIRROR_TYPES. The thumbnail follows the
+  // video so a post never ends up with its poster and its player on different
+  // hosts; if only the thumbnail push fails we keep the local poster, which is
+  // cosmetically identical.
+  const published = await mirror.publish({
+    id,
+    kind: 'videos',
+    mediaType: 'video',
+    file: `${id}${ext}`,
+    filePath: finalPath,
+  });
+
+  // Only when the video itself went to Sia, and only when a thumbnail actually
+  // got generated — the ffmpeg step above is allowed to fail with a warning, and
+  // pushing a file that is not there would log a misleading mirror error.
+  let thumbnailUrl = `${config.PUBLIC_BASE_URL}/thumbnails/${id}.jpg`;
+  if (published.url && (await exists(thumbPath))) {
+    const thumb = await mirror.publish({
+      id,
+      kind: 'thumbnails',
+      mediaType: 'video',
+      file: `${id}.jpg`,
+      filePath: thumbPath,
+    });
+    if (thumb.url) thumbnailUrl = thumb.url;
+  }
+
   await jobs.update(id, {
     state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/videos/${id}${ext}`,
-    thumbnail_url: `${config.PUBLIC_BASE_URL}/thumbnails/${id}.jpg`,
+    url: published.url || `${config.PUBLIC_BASE_URL}/videos/${id}${ext}`,
+    thumbnail_url: thumbnailUrl,
     duration_sec: Math.round(duration),
     width: videoStream.width,
     height: videoStream.height,
     filename: job && job.filename,
+    ...published.patch,
   });
-  logger.info({ id, duration }, 'video ready');
+  logger.info({ id, duration, sia: published.patch.sia_state }, 'video ready');
 }
 
 async function processAudio(id, src, probe) {
@@ -100,13 +138,23 @@ async function processAudio(id, src, probe) {
   await withOneRetry(id, () => ffmpeg.transcodeToAac(src, tmpPath));
   await fsp.rename(tmpPath, finalPath);
 
+  // Inert until 'audio' is added to SIA_MIRROR_TYPES.
+  const published = await mirror.publish({
+    id,
+    kind: 'audio',
+    mediaType: 'audio',
+    file: `${id}${ext}`,
+    filePath: finalPath,
+  });
+
   await jobs.update(id, {
     state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/audio/${id}${ext}`,
+    url: published.url || `${config.PUBLIC_BASE_URL}/audio/${id}${ext}`,
     duration_sec: Math.round(duration),
     filename: job && job.filename,
+    ...published.patch,
   });
-  logger.info({ id, duration }, 'audio ready');
+  logger.info({ id, duration, sia: published.patch.sia_state }, 'audio ready');
 }
 
 async function processImage(id, src, meta) {
@@ -135,14 +183,29 @@ async function processImage(id, src, meta) {
   // both change this from the uploaded dimensions.
   const { width, height } = await image.publishedSize(finalPath);
 
+  // Push to Sia before going 'ready'. The URL in this update is what serey-api
+  // stores on the post row for good, so it has to be final here — see the note
+  // at the top of mirror.js. A Sia failure just leaves us on the local URL.
+  const published = await mirror.publish({
+    id,
+    kind: 'images',
+    mediaType: 'image',
+    file: `${id}${ext}`,
+    filePath: finalPath,
+  });
+
   await jobs.update(id, {
     state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/images/${id}${ext}`,
+    url: published.url || `${config.PUBLIC_BASE_URL}/images/${id}${ext}`,
     width,
     height,
     filename: job && job.filename,
+    ...published.patch,
   });
-  logger.info({ id, width, height, from: meta.format }, 'image ready');
+  logger.info(
+    { id, width, height, from: meta.format, sia: published.patch.sia_state },
+    'image ready',
+  );
 }
 
 async function process(id) {

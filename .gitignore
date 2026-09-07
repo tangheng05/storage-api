@@ -2,3 +2,6 @@ node_modules/
 .env
 data/
 *.log
+
+# Local agent/editor state, never part of the repo.
+.claude/

@@ -19,6 +19,7 @@ const logger = require('./services/logger');
 const app = require('./app');
 const tusServer = require('./tus');
 const processor = require('./services/processor');
+const mirror = require('./services/mirror');
 
 processor.recoverOnBoot();
 
@@ -31,4 +32,17 @@ setInterval(() => {
 
 app.listen(config.PORT, () => {
   logger.info({ port: config.PORT, base_url: config.PUBLIC_BASE_URL }, 'serey video storage api started');
+
+  // Deferred on purpose. These jobs are already 'ready' and serving correctly;
+  // they just never made it onto Sia, so this is durability catch-up with no
+  // user waiting on it. listByState scans and parses every job file
+  // synchronously, and doing that before listen would hold up accepting
+  // uploads for as long as the scan takes.
+  setImmediate(() => {
+    try {
+      mirror.recoverOnBoot();
+    } catch (err) {
+      logger.error({ err: err.message }, 'sia recovery sweep failed');
+    }
+  });
 });

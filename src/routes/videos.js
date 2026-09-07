@@ -3,6 +3,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const config = require('../config');
 const jobs = require('../services/jobs');
+const mirror = require('../services/mirror');
 const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -52,6 +53,11 @@ router.delete('/:id', requireUploadKey, validateId, async (req, res, next) => {
       fsp.rm(path.join(config.TUS_DIR, id), { force: true }),
       fsp.rm(path.join(config.TUS_DIR, `${id}.json`), { force: true }),
     ]);
+
+    // Drop the Sia copy too. Once files are served from Sia, removing only
+    // the local one would leave a deleted file still loading for everyone.
+    await mirror.purge(job);
+
     await jobs.remove(id);
     return res.json({ deleted: id });
   } catch (err) {

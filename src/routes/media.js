@@ -7,6 +7,8 @@ const jobs = require('../services/jobs');
 const logger = require('../services/logger');
 const { requireUploadKey } = require('../middleware/auth');
 const { verify } = require('../utils/signed_url');
+const sia = require('../services/sia');
+const mirror = require('../services/mirror');
 
 const router = express.Router();
 
@@ -72,36 +74,107 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
   const to = path.join(target === 'private' ? dirs.private : dirs.public, file);
 
   try {
-    if (await exists(to)) {
-      // Already there. Report the URL so the caller can store it either way.
-      return res.json({ id, visibility: target, url: buildUrl(req.params.kind, target, file) });
-    }
+    const alreadyLocal = await exists(to);
 
-    if (!(await exists(from))) {
+    if (!alreadyLocal && !(await exists(from))) {
       return res.status(404).json({ error: 'Media not found' });
     }
 
-    await fs.mkdir(path.dirname(to), { recursive: true });
-    await fs.rename(from, to);
+    if (!alreadyLocal) {
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      await fs.rename(from, to);
+    }
+
+    // Reconcile the Sia copy onto the matching prefix. This runs even when the
+    // local file was already in place, and that is the whole point: if a
+    // previous call moved the file locally but its Sia move failed, an early
+    // return here would leave a now-premium object sitting under public/ for
+    // good, where a public gateway would serve it to anyone. Retrying the call
+    // has to be able to finish the job.
+    const siaPatch = await reconcileSia({
+      id,
+      kind: req.params.kind,
+      file,
+      target,
+    });
 
     // Best effort: the job record is metadata, not the source of truth for
     // delivery. A missing job must not fail the move.
     try {
-      await jobs.update(id, { visibility: target });
+      await jobs.update(id, { visibility: target, ...siaPatch });
     } catch {}
 
-    logger.info({ id, kind: req.params.kind, target }, 'media visibility changed');
-    return res.json({ id, visibility: target, url: buildUrl(req.params.kind, target, file) });
+    logger.info(
+      { id, kind: req.params.kind, target, already_local: alreadyLocal },
+      'media visibility changed',
+    );
+    return res.json({
+      id,
+      visibility: target,
+      url: await buildUrlFor(id, req.params.kind, target, file),
+    });
   } catch (err) {
     logger.error({ err, id }, 'media visibility change failed');
     return res.status(500).json({ error: 'Could not change visibility' });
   }
 });
 
-function buildUrl(kind, visibility, file) {
-  return visibility === 'private'
-    ? `${config.PUBLIC_BASE_URL}/media/${kind}/${file}`
-    : `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
+/*
+| Move the Sia object to the prefix matching the new visibility.
+|
+| Skipped entirely for anything that was never mirrored: legacy files that
+| predate Sia, and media types not in SIA_MIRROR_TYPES, have no object to move
+| and would otherwise log a 404 warning on every flip.
+|
+| Never throws. The local rename is what actually enforces the paywall today, so
+| a Sia hiccup must not fail the request; it is recorded as 'failed' and the
+| caller can simply retry the endpoint, which now reconciles properly.
+*/
+async function reconcileSia({ id, kind, file, target }) {
+  if (!sia.enabled()) return {};
+
+  let job = null;
+  try {
+    job = await jobs.get(id);
+  } catch {
+    // Unreadable job record; treat as never mirrored.
+  }
+  if (!job || !job.sia_key) return {};
+
+  const toKey = sia.buildKey({ kind, file, visibility: target });
+  if (job.sia_key === toKey && job.sia_state === 'mirrored') return {};
+
+  try {
+    await sia.moveObject({ fromKey: job.sia_key, toKey });
+    return { sia_key: toKey, sia_state: 'mirrored', sia_error: null };
+  } catch (err) {
+    logger.warn(
+      { id, fromKey: job.sia_key, toKey, err: err.message },
+      'sia visibility move failed, object left on old prefix',
+    );
+    return { sia_state: 'failed', sia_error: err.message };
+  }
+}
+
+/*
+| Private objects are always served from local disk through the signed /media/
+| path, so they keep PUBLIC_BASE_URL. A public object that lives on Sia has to
+| report its Sia URL, otherwise flipping a video back to Public would silently
+| move that row off Sia and onto local delivery.
+*/
+async function buildUrlFor(id, kind, visibility, file) {
+  if (visibility === 'private') {
+    return `${config.PUBLIC_BASE_URL}/media/${kind}/${file}`;
+  }
+  if (mirror.serving()) {
+    try {
+      const job = await jobs.get(id);
+      if (job && job.sia_served) return `${config.SIA_PUBLIC_BASE_URL}/${kind}/${file}`;
+    } catch {
+      // Fall through to the local URL, which always works.
+    }
+  }
+  return `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
 }
 
 /*

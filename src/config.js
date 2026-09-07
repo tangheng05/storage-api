@@ -75,6 +75,34 @@ module.exports = {
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS, 10) || 2,
   CREATES_PER_HOUR: parseInt(process.env.CREATES_PER_HOUR, 10) || 30,
 
+  // Sia mirror. Off by default: with SIA_ENABLED false the service behaves
+  // exactly as it did before, makes no network calls, and needs no credentials.
+  // Local disk stays the origin either way — Sia is the durable second copy,
+  // because a single Hetzner volume holding every image on the platform is one
+  // disk failure away from losing all of it.
+  SIA_ENABLED: process.env.SIA_ENABLED === 'true',
+  SIA_S3_ENDPOINT: process.env.SIA_S3_ENDPOINT || '',
+  SIA_S3_BUCKET: process.env.SIA_S3_BUCKET || '',
+  SIA_S3_ACCESS_KEY: process.env.SIA_S3_ACCESS_KEY || '',
+  SIA_S3_SECRET_KEY: process.env.SIA_S3_SECRET_KEY || '',
+  // s3d ignores the region but the SDK refuses to build a client without one.
+  SIA_S3_REGION: process.env.SIA_S3_REGION || 'us-east-1',
+  // Where Sia-backed files are served from, e.g. https://cdn.serey.io. Set it
+  // and a newly uploaded file's URL points here instead of at the local disk;
+  // leave it empty and the upload is a pure background backup. Existing rows in
+  // serey-api are untouched either way — their URLs are absolute, so old media
+  // keeps being served off PUBLIC_BASE_URL exactly as before. No migration.
+  SIA_PUBLIC_BASE_URL: (process.env.SIA_PUBLIC_BASE_URL || '').replace(/\/$/, ''),
+  // Which media types get mirrored. Images first; add video,audio once the
+  // path has been proven on real traffic.
+  SIA_MIRROR_TYPES: (process.env.SIA_MIRROR_TYPES || 'image')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+  // Ceiling on how many unfinished mirrors a single boot picks up, so a long
+  // outage cannot queue thousands of uploads ahead of live traffic.
+  SIA_RECOVER_LIMIT: parseInt(process.env.SIA_RECOVER_LIMIT, 10) || 200,
+
   FFMPEG_PATH: process.env.FFMPEG_PATH || 'ffmpeg',
   FFPROBE_PATH: process.env.FFPROBE_PATH || 'ffprobe',
 };
