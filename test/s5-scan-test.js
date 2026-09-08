@@ -491,6 +491,27 @@ async function main() {
   ok('finishReason SAFETY counts as a reject',
     (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
 
+  // Free-tier Gemini answers 503 "high demand" often enough that one attempt is
+  // not workable: with the gate failing closed, a blip holds the upload.
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    if (calls < 3) return { ok: false, status: 503, text: async () => 'high demand' };
+    return { ok: true, json: async () => ({ candidates: [{ finishReason: 'STOP' }] }) };
+  };
+  const recovered = await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  ok('a transient 503 is retried rather than held', recovered.verdict === 'clean');
+  ok('and it took the retries to get there', calls === 3);
+
+  // a config error must fail immediately, not burn the backoff
+  calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return { ok: false, status: 403, text: async () => 'SERVICE_DISABLED' };
+  };
+  await assert.rejects(() => scan.scanFile({ filePath: small, mediaType: 'image', immutable: false }));
+  ok('a 403 is not retried', calls === 1);
+
   global.fetch = keepFetch2;
   cfg2.SCAN_PROVIDERS = keepProv;
 

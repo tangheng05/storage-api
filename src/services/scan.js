@@ -22,6 +22,43 @@ const logger = require('./logger');
 
 const VERDICT = { CLEAN: 'clean', REVIEW: 'review', REJECT: 'reject' };
 
+/*
+| Every classifier is a remote call that can blip. Free-tier Gemini in
+| particular answers 503 "experiencing high demand" often enough that a single
+| attempt is not workable: with the gate failing closed, one blip holds an
+| upload until the next hourly sweep.
+|
+| So retry the statuses that mean "try again" and nothing else. A 400 or 403 is
+| a configuration problem and retrying it just delays the error.
+*/
+const TRANSIENT = new Set([429, 500, 502, 503, 504]);
+
+async function post(url, init, { attempts = 3 } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await fetch(url, { ...init, signal: ac.signal, redirect: 'error' });
+      if (res.ok) return res;
+      const body = (await res.text().catch(() => '')).slice(0, 200);
+      lastError = new Error(`${res.status} ${body}`);
+      if (!TRANSIENT.has(res.status)) throw lastError;
+    } catch (err) {
+      lastError = err;
+      if (err.name === 'AbortError') lastError = new Error('scanner timed out');
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt < attempts) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 500 * (2 ** (attempt - 1))));
+    }
+  }
+  throw lastError;
+}
+
 // Every category has to be listed in safetySettings for BLOCK_NONE to apply,
 // even the ones SCAN_GEMINI_CATEGORIES ignores.
 const HARM_CATEGORY_ALL = {
@@ -120,27 +157,15 @@ async function runHttp(filePath, { mediaType }) {
   const headers = { 'content-type': 'application/json' };
   if (config.SCAN_HTTP_KEY) headers[config.SCAN_HTTP_KEY_HEADER] = config.SCAN_HTTP_KEY;
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
-  let body;
-  try {
-    const res = await fetch(config.SCAN_HTTP_URL, {
-      method: 'POST',
-      headers,
-      signal: ac.signal,
-      // undici does not strip a custom auth header across origins, so a
-      // redirecting classifier could otherwise exfiltrate the key and the file.
-      redirect: 'error',
-      body: JSON.stringify({
-        media_type: mediaType,
-        content_base64: buf.toString('base64'),
-      }),
-    });
-    if (!res.ok) throw new Error(`scanner returned ${res.status}`);
-    body = await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
+  // redirect: 'error' inside post() matters here: undici does not strip a
+  // custom auth header across origins, so a redirecting classifier could
+  // otherwise exfiltrate the key and the file.
+  const res = await post(config.SCAN_HTTP_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ media_type: mediaType, content_base64: buf.toString('base64') }),
+  });
+  const body = await res.json();
 
   if (typeof body.verdict === 'string') {
     const verdict = body.verdict.toLowerCase();
@@ -192,30 +217,20 @@ async function runVision(filePath) {
   if (!config.SCAN_VISION_API_KEY) throw new Error('scan_vision_api_key_not_set');
   const buf = await fsp.readFile(filePath);
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
-  let body;
-  try {
-    const res = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${config.SCAN_VISION_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        signal: ac.signal,
-        redirect: 'error',
-        body: JSON.stringify({
-          requests: [{
-            image: { content: buf.toString('base64') },
-            features: [{ type: 'SAFE_SEARCH_DETECTION' }],
-          }],
-        }),
-      },
-    );
-    if (!res.ok) throw new Error(`vision returned ${res.status}`);
-    body = await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await post(
+    `https://vision.googleapis.com/v1/images:annotate?key=${config.SCAN_VISION_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        requests: [{
+          image: { content: buf.toString('base64') },
+          features: [{ type: 'SAFE_SEARCH_DETECTION' }],
+        }],
+      }),
+    },
+  );
+  const body = await res.json();
 
   const first = body?.responses?.[0];
   if (first?.error) throw new Error(`vision: ${first.error.message}`);
@@ -259,33 +274,23 @@ async function runGemini(filePath) {
   const buf = await fsp.readFile(filePath);
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
-  let body;
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.SCAN_GEMINI_MODEL}:generateContent?key=${config.SCAN_GEMINI_API_KEY}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      signal: ac.signal,
-      redirect: 'error',
-      body: JSON.stringify({
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.SCAN_GEMINI_MODEL}:generateContent?key=${config.SCAN_GEMINI_API_KEY}`;
+  const res = await post(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
         contents: [{
           parts: [
             { text: 'Describe this image in one word.' },
             { inline_data: { mime_type: GEMINI_MIME[ext] || 'image/jpeg', data: buf.toString('base64') } },
           ],
         }],
-        safetySettings: Object.keys(HARM_CATEGORY_ALL).map((category) => ({
-          category, threshold: 'BLOCK_NONE',
-        })),
-      }),
-    });
-    if (!res.ok) throw new Error(`gemini returned ${res.status} ${(await res.text()).slice(0, 200)}`);
-    body = await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
+      safetySettings: Object.keys(HARM_CATEGORY_ALL).map((category) => ({
+        category, threshold: 'BLOCK_NONE',
+      })),
+    }),
+  });
+  const body = await res.json();
 
   // Ratings live on the candidate normally, or on promptFeedback when the input
   // itself tripped something.
