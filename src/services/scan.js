@@ -371,7 +371,13 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     verdict: worst.verdict,
     score: worst.score,
     labels: worst.labels || [],
+    // The provider whose verdict won.
     provider: worst.provider,
+    // Every provider that actually answered. Without this a clean result names
+    // only the first one, so there is no way to tell from a job record whether
+    // the classifier ran at all -- and a silently absent classifier looks
+    // exactly like a clean platform.
+    providers: results.map((r) => r.provider),
     // Recorded on every job so a later takedown can blocklist it.
     phash: (results.find((r) => r.phash) || {}).phash || null,
     matched: (results.find((r) => r.matched) || {}).matched || null,

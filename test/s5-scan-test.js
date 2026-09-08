@@ -237,6 +237,9 @@ async function main() {
   await processor.finalize(ULID_A);
   const cleared = await jobs.get(ULID_A);
   ok('a clean upload becomes ready', cleared.state === 'ready');
+  // Every provider that answered is recorded, so an absent classifier is
+  // visible in the job rather than indistinguishable from a clean result.
+  ok('it records which providers ran', (cleared.scan_providers || []).includes('phash'));
   ok('a clean upload records its CID', !!cleared.s5_cid);
   ok('a clean upload is served from our own hostname',
     cleared.url === `https://cdn.test.local/images/${ULID_A}.webp`);

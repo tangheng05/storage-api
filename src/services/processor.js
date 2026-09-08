@@ -371,6 +371,11 @@ async function finalize(id, { approved = false } = {}) {
   const patch = {
     scan_verdict: result.verdict,
     scan_provider: result.provider,
+    // Which providers answered, not just which one won. A clean result names
+    // only the first, so without this there is no way to tell from a job
+    // whether the classifier ran — and an absent classifier looks identical to
+    // a clean platform.
+    scan_providers: result.providers || (result.provider ? [result.provider] : []),
     scan_score: result.score,
     scan_labels: result.labels,
     // Kept even when cleared: a later takedown can blocklist it.
