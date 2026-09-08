@@ -134,6 +134,26 @@ module.exports = {
   // default rather than pretend to a takedown we cannot perform.
   S5_UNPIN_ENABLED: process.env.S5_UNPIN_ENABLED === 'true',
 
+  // S5's own blobs, read back out of s3d for the node and for its peers.
+  //
+  // S5's S3 store reads exclusively through presigned URLs. s3d authenticates
+  // on the Authorization header only, treats a query-signed request as
+  // anonymous, and refuses anonymous reads outright — so every read failed, and
+  // the node reported it as an integrity error because it hashed the 403 body.
+  // Setting cdnUrls in the node's config.toml makes it build a plain URL
+  // instead; this route is what that URL points at.
+  //
+  // Its own endpoint and credentials, not the mirror's: premium may keep s3d
+  // switched off entirely, and s3d scopes buckets to the user that made them,
+  // so S5's bucket needs S5's own key.
+  S5_BLOB_ENABLED: process.env.S5_BLOB_ENABLED === 'true',
+  S5_BLOB_S3_ENDPOINT: process.env.S5_BLOB_S3_ENDPOINT || process.env.SIA_S3_ENDPOINT || '',
+  S5_BLOB_S3_BUCKET: process.env.S5_BLOB_S3_BUCKET || '',
+  S5_BLOB_S3_ACCESS_KEY: process.env.S5_BLOB_S3_ACCESS_KEY || '',
+  S5_BLOB_S3_SECRET_KEY: process.env.S5_BLOB_S3_SECRET_KEY || '',
+  // Blobs are named by their own hash, so a response can never go stale.
+  S5_BLOB_CACHE_SEC: num(process.env.S5_BLOB_CACHE_SEC, 31536000),
+
   // Our own hostname, ULID in the path, CID resolved server side. serey-api
   // freezes these into post rows permanently, so never let a raw CID or a
   // portal domain into one.

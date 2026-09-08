@@ -11,6 +11,7 @@ const audioRouter = require('./routes/audio');
 const imagesRouter = require('./routes/images');
 const mediaRouter = require('./routes/media');
 const cdnRouter = require('./routes/cdn');
+const blobRouter = require('./routes/blob');
 const moderationRouter = require('./routes/moderation');
 
 const app = express();
@@ -19,6 +20,13 @@ const app = express();
 app.set('trust proxy', config.TRUST_PROXY_HOPS);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
+
+// S5's blob store, mounted ahead of the origin allowlist and with its own
+// permissive CORS. These bytes are addressed by hash and are meant to be
+// fetched by S5 clients we do not control — including browser ones, on origins
+// that are not ours. S5's own S3 store sets AllowedOrigin '*' on the bucket for
+// exactly this reason, so refusing unknown origins here would defeat the point.
+app.use('/blob', cors({ origin: true, methods: ['GET', 'HEAD'], maxAge: 86400 }), blobRouter);
 
 // ALLOWED_ORIGINS entries may be exact origins, wildcard-subdomain patterns
 // ("https://*.serey.io"), or "*" for any origin. Communities live on many

@@ -46,6 +46,8 @@ accessKey = "<from step 2>"
 secretKey = "<from step 2>"
 bucket = "media"
 endpointUrl = "http://s3d:8000"
+# REQUIRED. Without it every read fails -- see "S5 cannot read from s3d" below.
+cdnUrls = ["https://storage.serey.io/blob/"]
 ```
 
 `docker compose restart s5`, then mint a token for `S5_AUTH_TOKEN` and set
@@ -57,6 +59,41 @@ endpointUrl = "http://s3d:8000"
 |---|---|
 | `/var/lib/s3d/s3d.yml` | the 12-word recovery phrase. **Lose it and everything on Sia is gone.** |
 | `/var/lib/s5/config/config.toml` | the node keypair seed, which cannot be regenerated |
+
+## S5 cannot read from s3d without `cdnUrls`
+
+The two projects do not fit together on their own, and the symptom names the
+wrong culprit: the node reports **"integrity verification failed"** on every
+read, which reads like corrupted bytes but is not.
+
+- S5's S3 store serves every read through a **presigned URL**
+  (`lib/store/s3.dart`, `provide()`).
+- s3d authenticates on the **`Authorization` header only**. A query-signed
+  request carries none, so `authMiddleware` treats it as anonymous, and
+  `sia/objects.go` refuses anonymous reads outright.
+
+So the node fetches a 119-byte `AccessDenied` XML body, hashes *that*, and
+reports a hash mismatch. Writes were never affected — those go through the SDK,
+which signs in the header — which is why uploads succeeded the whole time.
+
+`cdnUrls` is the way out. With it set, `provide()` returns a plain
+`<cdnUrl><key>` URL instead of signing one, and the storage API serves that
+prefix from s3d with proper header auth (`/blob`, gated on `S5_BLOB_ENABLED`).
+The node needs no other change. Two details make it work:
+
+- A `cdnUrls` location carries **one** part, so lib5 derives the outboard URL by
+  appending `.obao` to it (`StorageLocation.outboardBytesUrl`). That is exactly
+  the key layout in the bucket, so both land on the same route.
+- Blobs over 256KB are read in ranged 256KB windows and the node rejects
+  anything but 200/206, so the route must pass `Range` through.
+
+**The URL must be the public one.** `node.dart` signs it and broadcasts it to
+peers, so it is the address by which anyone else fetches these blobs by CID.
+Before this, the node was announcing `http://s3d:8000/...` — a container name
+that resolves nowhere outside the host — so fetch-by-CID by others could never
+have worked, presigning bug or not.
+
+`npm run test:blob` covers our side of it. Only a live node proves the rest.
 
 ## Things that cost us time
 

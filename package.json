@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "dev": "node src/index.js",
     "test:s5": "node test/s5-scan-test.js",
-    "test:s3d": "node test/s3d-test.js"
+    "test:s3d": "node test/s3d-test.js",
+    "test:blob": "node test/s5-blob-test.js"
   },
   "engines": {
     "node": ">=18.0.0"

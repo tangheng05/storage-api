@@ -29,23 +29,21 @@ function enabled() {
   );
 }
 
-// Lazy so the SDK need not even be installed on a deployment that skips s3d.
-function getClient() {
-  if (client) return client;
+/*
+| Every s3d quirk the SDK needs lives here, because two callers now need a
+| client against the same gateway with different credentials: this module for
+| the premium mirror, and s5blob.js for S5's public blobs. s3d scopes buckets to
+| the user that created them, so they cannot share one key.
+*/
+function buildClient({ endpoint, accessKeyId, secretAccessKey }) {
   // eslint-disable-next-line global-require
-  const s3 = require('@aws-sdk/client-s3');
-  // eslint-disable-next-line global-require
-  ({ Upload } = require('@aws-sdk/lib-storage'));
+  const { S3Client } = require('@aws-sdk/client-s3');
   // eslint-disable-next-line global-require
   const { NodeHttpHandler } = require('@smithy/node-http-handler');
-  commands = s3;
-  client = new s3.S3Client({
-    endpoint: config.SIA_S3_ENDPOINT,
+  return new S3Client({
+    endpoint,
     region: config.SIA_S3_REGION,
-    credentials: {
-      accessKeyId: config.SIA_S3_ACCESS_KEY,
-      secretAccessKey: config.SIA_S3_SECRET_KEY,
-    },
+    credentials: { accessKeyId, secretAccessKey },
     // s3d addresses buckets by path, not by DNS subdomain.
     forcePathStyle: true,
     // The SDK ships no request timeout at all, and the publish lane is
@@ -58,6 +56,20 @@ function getClient() {
     // headers the SDK sends by default. 'when_required' is the way out.
     requestChecksumCalculation: config.SIA_S3_CHECKSUMS,
     responseChecksumValidation: config.SIA_S3_CHECKSUMS,
+  });
+}
+
+// Lazy so the SDK need not even be installed on a deployment that skips s3d.
+function getClient() {
+  if (client) return client;
+  // eslint-disable-next-line global-require
+  commands = require('@aws-sdk/client-s3');
+  // eslint-disable-next-line global-require
+  ({ Upload } = require('@aws-sdk/lib-storage'));
+  client = buildClient({
+    endpoint: config.SIA_S3_ENDPOINT,
+    accessKeyId: config.SIA_S3_ACCESS_KEY,
+    secretAccessKey: config.SIA_S3_SECRET_KEY,
   });
   return client;
 }
@@ -171,6 +183,7 @@ async function moveObject({ fromKey, toKey }) {
 }
 
 module.exports = {
+  buildClient,
   enabled,
   buildKey,
   putFile,

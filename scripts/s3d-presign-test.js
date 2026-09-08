@@ -75,11 +75,19 @@ async function fetchAndHash(label, url, headers = {}) {
   // The outboard BLAKE3 tree S5 uses for verified streaming. If this is the
   // wrong size for the object, verification cannot succeed no matter what the
   // data path does.
+  // Sized only if it actually arrived. An earlier version of this script read
+  // the length of a 403 body and announced the outboard was too small, which is
+  // the same mistake the node makes -- drawing a confident conclusion from an
+  // error page.
   const obao = await getSignedUrl(normal, new GetObjectCommand({ Bucket: BUCKET, Key: `${key}.obao` }), { expiresIn: 3600 });
   const res = await fetch(obao);
   const tree = Buffer.from(await res.arrayBuffer());
   console.log();
   console.log('.obao', `http ${res.status}`, tree.length, 'bytes');
+  if (res.status >= 400) {
+    console.log('      not read, so its size says nothing:', tree.toString('utf8').slice(0, 120));
+    return;
+  }
   // bao outboard is 8 bytes of length plus 64 per parent node, and a file of N
   // 1024-byte chunks has N-1 parents.
   const chunks = Math.ceil(local.length / 1024);
