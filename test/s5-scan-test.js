@@ -440,26 +440,43 @@ async function main() {
   ok('the worst configured category wins',
     (await safeSearch({ adult: 'VERY_UNLIKELY', violence: 'VERY_LIKELY' })).verdict === 'reject');
 
-  // --- gemini safetyRatings mapping ---
+  // --- gemini classification ---
+  // It is asked to rate the image and answers under a responseSchema, so the
+  // reply is integers. Reading safetyRatings instead does NOT work: those rate
+  // the model's own answer, so a photo of a firearm scores NEGLIGIBLE exactly
+  // like a blank image, and the provider silently passed everything.
   cfg2.SCAN_PROVIDERS = ['gemini'];
   cfg2.SCAN_GEMINI_API_KEY = 'test-key';
-  const rated = (ratings, extra = {}) => {
+  const classified = (rating, extra = {}) => {
     global.fetch = async () => ({
       ok: true,
-      json: async () => ({ candidates: [{ safetyRatings: ratings }], ...extra }),
+      json: async () => ({
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: JSON.stringify(rating) }] },
+        }],
+        ...extra,
+      }),
     });
     return scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
   };
-  const sexual = (p) => [{ category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', probability: p }];
 
-  ok('HIGH sexually explicit is rejected', (await rated(sexual('HIGH'))).verdict === 'reject');
-  ok('MEDIUM goes to a human', (await rated(sexual('MEDIUM'))).verdict === 'review');
-  ok('LOW still publishes', (await rated(sexual('LOW'))).verdict === 'clean');
-  ok('NEGLIGIBLE publishes', (await rated(sexual('NEGLIGIBLE'))).verdict === 'clean');
-  // harassment is not in SCAN_GEMINI_CATEGORIES by default
-  ok('an unconfigured category is ignored',
-    (await rated([{ category: 'HARM_CATEGORY_HARASSMENT', probability: 'HIGH' }])).verdict === 'clean');
-  // a hard block with no ratings is itself the signal
+  ok('95 sexual is rejected',
+    (await classified({ sexual: 95, violence: 0, weapons: 0 })).verdict === 'reject');
+  ok('70 goes to a human',
+    (await classified({ sexual: 70, violence: 0, weapons: 0 })).verdict === 'review');
+  ok('30 still publishes',
+    (await classified({ sexual: 30, violence: 0, weapons: 0 })).verdict === 'clean');
+  ok('the worst configured category wins',
+    (await classified({ sexual: 0, violence: 95, weapons: 0 })).verdict === 'reject');
+  // A real photo of a gun collection rates weapons 100. That is not a takedown
+  // reason, which is why weapons is not in SCAN_GEMINI_CATEGORIES.
+  ok('100 weapons is ignored by default',
+    (await classified({ sexual: 0, violence: 0, weapons: 100 })).verdict === 'clean');
+  ok('the score is reported, not just the verdict',
+    (await classified({ sexual: 70, violence: 0, weapons: 0 })).score === 0.7);
+
+  // a refusal on explicit input is the answer, not a failure
   global.fetch = async () => ({
     ok: true,
     json: async () => ({ promptFeedback: { blockReason: 'SAFETY' } }),
@@ -467,32 +484,16 @@ async function main() {
   ok('a safety block counts as a reject',
     (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
 
-  // 2.5 omits safetyRatings when nothing trips. That must read as clean, not as
-  // a broken scanner -- treating it as an error held every upload in 'scanning'.
+  // anything unparseable must fail closed, never pass
   global.fetch = async () => ({
     ok: true,
-    json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'cat' }] } }] }),
+    json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'sorry' }] } }] }),
   });
-  const unflagged = await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
-  ok('a successful generation with no ratings is clean', unflagged.verdict === 'clean');
-  ok('and it says so rather than reporting a score of nothing',
-    (unflagged.labels || []).includes('unflagged'));
-
-  // an empty response is still an error, so a malformed reply cannot pass
-  global.fetch = async () => ({ ok: true, json: async () => ({}) });
   await assert.rejects(
     () => scan.scanFile({ filePath: small, mediaType: 'image', immutable: false }),
-    /neither a candidate nor safetyRatings/,
+    /unparseable/,
   );
-  ok('an empty response is an error, not a pass', true);
-
-  // finishReason SAFETY is a reject even without ratings
-  global.fetch = async () => ({
-    ok: true,
-    json: async () => ({ candidates: [{ finishReason: 'SAFETY' }] }),
-  });
-  ok('finishReason SAFETY counts as a reject',
-    (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
+  ok('an unparseable reply is an error, not a pass', true);
 
   // Free-tier Gemini answers 503 "high demand" often enough that one attempt is
   // not workable: with the gate failing closed, a blip holds the upload.
@@ -500,10 +501,15 @@ async function main() {
   global.fetch = async () => {
     calls += 1;
     if (calls < 3) return { ok: false, status: 503, text: async () => 'high demand' };
-    return { ok: true, json: async () => ({ candidates: [{ finishReason: 'STOP' }] }) };
+    return {
+      ok: true,
+      json: async () => ({
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"sexual":0,"violence":0,"weapons":0}' }] } }],
+      }),
+    };
   };
-  const recovered = await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
-  ok('a transient 503 is retried rather than held', recovered.verdict === 'clean');
+  ok('a transient 503 is retried rather than held',
+    (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'clean');
   ok('and it took the retries to get there', calls === 3);
 
   // a config error must fail immediately, not burn the backoff

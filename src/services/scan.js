@@ -63,15 +63,6 @@ async function post(url, init, { attempts = 3 } = {}) {
   throw lastError;
 }
 
-// Every category has to be listed in safetySettings for BLOCK_NONE to apply,
-// even the ones SCAN_GEMINI_CATEGORIES ignores.
-const HARM_CATEGORY_ALL = {
-  HARM_CATEGORY_SEXUALLY_EXPLICIT: 1,
-  HARM_CATEGORY_DANGEROUS_CONTENT: 1,
-  HARM_CATEGORY_HARASSMENT: 1,
-  HARM_CATEGORY_HATE_SPEECH: 1,
-};
-
 function enabled() {
   return config.SCAN_ENABLED && config.SCAN_PROVIDERS.length > 0;
 }
@@ -253,84 +244,93 @@ async function runVision(filePath) {
 }
 
 /*
-| Gemini, reading its own safetyRatings instead of asking it to classify.
+| Gemini as an image classifier.
 |
-| A prompt would be the obvious approach and is the wrong one: the model can
-| refuse, and the wording drifts between versions, so the thing deciding whether
-| a user's upload gets deleted would be non-deterministic. The ratings come back
-| on every response and are the same classifier Google applies internally.
+| The obvious approach -- reading the safetyRatings that come back on every
+| response -- does not work, and it is worth recording why so nobody tries it
+| again. Those ratings describe the model's OWN ANSWER, not the input: a photo
+| of a handgun collection asked "describe this in one word" rates NEGLIGIBLE on
+| every category, identical to a blank gradient. Worse, threshold BLOCK_NONE
+| suppresses the ratings entirely, so the provider silently returned "clean" for
+| everything.
 |
-| Safety blocking is turned OFF on purpose. Not to permit anything -- we never
-| use the generated text -- but because a hard block returns an error where we
-| need a score. BLOCK_NONE keeps the ratings flowing.
+| So it has to be asked directly. responseSchema pins the reply to integers,
+| which removes the usual objection to prompting -- there is no prose to parse
+| and nothing to drift -- and temperature 0 keeps it stable. BLOCK_NONE stays,
+| now for the opposite reason: we need an answer about explicit input rather
+| than a refusal.
 */
-const HARM_PROBABILITY = {
-  NEGLIGIBLE: 0,
-  LOW: 0.25,
-  MEDIUM: 0.6,
-  HIGH: 0.9,
+const GEMINI_SCHEMA = {
+  type: 'OBJECT',
+  properties: { sexual: { type: 'INTEGER' }, violence: { type: 'INTEGER' }, weapons: { type: 'INTEGER' } },
+  required: ['sexual', 'violence', 'weapons'],
 };
 
-const GEMINI_MIME = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
+const GEMINI_PROMPT = 'Rate this image 0-100 for each: sexual (nudity or pornography), '
+  + 'violence (gore or injury), weapons (firearms or knives shown). '
+  + '0 = absent, 100 = explicit and unmistakable. Numbers only.';
+
+const HARM_CATEGORY_ALL = [
+  'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+  'HARM_CATEGORY_DANGEROUS_CONTENT',
+  'HARM_CATEGORY_HARASSMENT',
+  'HARM_CATEGORY_HATE_SPEECH',
+];
+
+const GEMINI_MIME = {
+  '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+};
 
 async function runGemini(filePath) {
   if (!config.SCAN_GEMINI_API_KEY) throw new Error('scan_gemini_api_key_not_set');
   const buf = await fsp.readFile(filePath);
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.SCAN_GEMINI_MODEL}:generateContent?key=${config.SCAN_GEMINI_API_KEY}`;
-  const res = await post(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
+  const res = await post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${config.SCAN_GEMINI_MODEL}:generateContent?key=${config.SCAN_GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
         contents: [{
           parts: [
-            { text: 'Describe this image in one word.' },
+            { text: GEMINI_PROMPT },
             { inline_data: { mime_type: GEMINI_MIME[ext] || 'image/jpeg', data: buf.toString('base64') } },
           ],
         }],
-      safetySettings: Object.keys(HARM_CATEGORY_ALL).map((category) => ({
-        category, threshold: 'BLOCK_NONE',
-      })),
-    }),
-  });
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: GEMINI_SCHEMA,
+          temperature: 0,
+        },
+        safetySettings: HARM_CATEGORY_ALL.map((category) => ({ category, threshold: 'BLOCK_NONE' })),
+      }),
+    },
+  );
   const body = await res.json();
 
-  // Ratings live on the candidate normally, or on promptFeedback when the input
-  // itself tripped something.
   const candidate = body?.candidates?.[0];
-  const ratings = candidate?.safetyRatings || body?.promptFeedback?.safetyRatings || [];
-
-  // A block is the strongest signal there is, so it scores 1 rather than
-  // erroring.
+  // A refusal on explicit input is itself the answer, not a failure.
   if (body?.promptFeedback?.blockReason === 'SAFETY' || candidate?.finishReason === 'SAFETY') {
     return { provider: 'gemini', score: 1, labels: ['blocked'] };
   }
 
-  if (!ratings.length) {
-    /*
-    | 2.5 omits safetyRatings entirely when nothing is flagged, so on an
-    | otherwise successful generation their absence means nothing tripped.
-    |
-    | This is an inference from missing data, which is worth being careful
-    | about: requiring a real candidate first means a malformed or empty
-    | response is still an error rather than a silent pass, and phash runs
-    | alongside regardless. If Google changes the shape again, the symptom is
-    | this provider going quiet rather than loud -- worth re-checking against a
-    | known-explicit image if you ever depend on it alone.
-    */
-    if (candidate) return { provider: 'gemini', score: 0, labels: ['unflagged'] };
-    throw new Error('gemini returned neither a candidate nor safetyRatings');
+  const text = candidate?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('gemini returned no classification');
+  let rated;
+  try {
+    rated = JSON.parse(text);
+  } catch {
+    throw new Error(`gemini returned unparseable JSON: ${String(text).slice(0, 120)}`);
   }
 
   let score = 0;
   let label = null;
-  for (const r of ratings) {
-    if (!config.SCAN_GEMINI_CATEGORIES.includes(r.category)) continue;
-    const value = HARM_PROBABILITY[r.probability];
-    if (value === undefined || value <= score) continue;
-    score = value;
-    label = `${r.category.replace('HARM_CATEGORY_', '').toLowerCase()}:${r.probability}`;
+  for (const category of config.SCAN_GEMINI_CATEGORIES) {
+    const value = Number(rated[category]);
+    if (!Number.isFinite(value) || value / 100 <= score) continue;
+    score = value / 100;
+    label = `${category}:${value}`;
   }
 
   return { provider: 'gemini', score, labels: label ? [label] : [] };

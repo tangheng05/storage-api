@@ -172,10 +172,10 @@ module.exports = {
   SCAN_GEMINI_API_KEY: process.env.SCAN_GEMINI_API_KEY || '',
   // Whatever your key has access to. Flash models are the cheap ones.
   SCAN_GEMINI_MODEL: process.env.SCAN_GEMINI_MODEL || 'gemini-2.5-flash',
-  SCAN_GEMINI_CATEGORIES: csv(
-    process.env.SCAN_GEMINI_CATEGORIES,
-    'HARM_CATEGORY_SEXUALLY_EXPLICIT,HARM_CATEGORY_DANGEROUS_CONTENT',
-  ),
+  // What counts, of sexual / violence / weapons. 'weapons' is deliberately out:
+  // a legitimate photo of a firearm rates 100 there, and a gun in a picture is
+  // not a takedown reason on a social platform.
+  SCAN_GEMINI_CATEGORIES: csv(process.env.SCAN_GEMINI_CATEGORIES, 'sexual,violence'),
   // Frames sampled per video, spread across its duration. 1 scans only the
   // generated thumbnail, which catches an opening frame and misses a video that
   // turns bad later. Each extra frame is another classifier call.
