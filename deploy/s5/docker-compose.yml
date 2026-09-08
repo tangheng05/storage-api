@@ -43,10 +43,12 @@ services:
     image: ghcr.io/siafoundation/s3d:master
     container_name: s3d
     restart: unless-stopped
-    # Not published: only S5 talks to it, over the compose network. Run the CLI
-    # with `docker compose run --rm s3d <command>`.
-    expose:
-      - "8000"
+    # Loopback only. S5 reaches it over the compose network at http://s3d:8000;
+    # this mapping is for bucket management and debugging from the host, since
+    # s3d has no CLI for buckets. Run other CLI commands with
+    # `docker compose run --rm s3d <command>`.
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - /var/lib/s3d:/data
     logging:
