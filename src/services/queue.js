@@ -1,25 +1,20 @@
 const logger = require('./logger');
 
-// Minimal in-process FIFO queue, concurrency 1 *per lane*.
+// Minimal in-process FIFO, concurrency 1 *per lane*.
 //
-// Everything used to share one lane, which was fine while every job was
-// ffmpeg. Images broke that: a 200ms WebP conversion queued behind a 30-minute
-// HEVC transcode would leave the uploader staring at a spinner for half an
-// hour. Lanes are strictly about head-of-line blocking between cheap and
-// expensive work — they are NOT extra processes. The single-instance rule in
-// CLAUDE.md still holds; this is all one event loop.
-//
-// Two lanes means at most two concurrent encodes, which is deliberate: ffmpeg
-// is given the cores (see image.js pinning sharp to concurrency 1) so a burst
-// of photo uploads can't starve a video transcode.
+// Lanes are strictly about head-of-line blocking between cheap and expensive
+// work — a 200ms WebP conversion must not sit behind a 30-minute HEVC
+// transcode. They are NOT extra processes: the single-instance rule still
+// holds and this is all one event loop.
 
 const MEDIA_LANE = 'media'; // ffmpeg: video remux/transcode, audio transcode
 const IMAGE_LANE = 'image'; // sharp: fast, must not wait behind the above
-// Retrying Sia uploads that failed earlier. Network I/O, not CPU, and purely
-// background durability work — it must never sit in front of a live upload, nor
-// be held up by a transcode. The publish-time upload is NOT on this lane; that
-// one runs inline because the job's final URL depends on it.
+// Retrying storage pushes that failed earlier: background durability work that
+// must never sit in front of a live upload.
 const SIA_LANE = 'sia';
+// The scan gate and the storage push after it. Network I/O, kept off the
+// ffmpeg and sharp lanes so a slow classifier cannot stall conversions.
+const SCAN_LANE = 'scan';
 
 const lanes = new Map();
 
@@ -54,4 +49,5 @@ module.exports = {
   MEDIA_LANE,
   IMAGE_LANE,
   SIA_LANE,
+  SCAN_LANE,
 };

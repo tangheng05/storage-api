@@ -15,10 +15,9 @@ function validateId(req, res, next) {
   return next();
 }
 
-// Status may be read with the master key OR the per-upload scoped token the
-// uploader received at creation (see src/tus.js), so browsers/apps can poll
-// directly without holding the master key. Unauthenticated callers get 401
-// regardless of whether the id exists, to avoid leaking which ids are real.
+// Readable with the master key or the per-upload scoped token, so a client can
+// poll directly. Unauthenticated callers get 401 whether or not the id exists,
+// so real ids cannot be probed.
 router.get('/:id/status', validateId, async (req, res, next) => {
   try {
     const job = await jobs.get(req.params.id);
@@ -38,10 +37,9 @@ router.delete('/:id', requireUploadKey, validateId, async (req, res, next) => {
     const { id } = req.params;
     const job = await jobs.get(id);
     if (!job) return res.status(404).json({ error: 'Not found' });
-    // User-driven deletes (proxied by the frontend backend) carry the
-    // verified requester in x-delete-owner; a job that records a different
-    // owner is off-limits — video ids are public, login alone isn't enough.
-    // Direct master-key calls without the header (admin/ops) are unrestricted.
+    // Ids are public, so login alone is not enough: a user-driven delete carries
+    // the verified requester in x-delete-owner. Master-key calls without the
+    // header (admin/ops) are unrestricted.
     const requester = req.headers['x-delete-owner'];
     if (requester && job.owner && requester !== job.owner) {
       return res.status(403).json({ error: 'Not the owner of this video' });
@@ -50,16 +48,25 @@ router.delete('/:id', requireUploadKey, validateId, async (req, res, next) => {
       fsp.rm(path.join(config.VIDEOS_DIR, `${id}.mp4`), { force: true }),
       fsp.rm(path.join(config.VIDEOS_DIR, `${id}.webm`), { force: true }),
       fsp.rm(path.join(config.THUMBS_DIR, `${id}.jpg`), { force: true }),
+      // The premium copy: deleting only the public one left paywalled files on
+      // disk, still served to anyone holding an unexpired signed URL.
+      fsp.rm(path.join(config.PRIVATE_VIDEOS_DIR, `${id}.mp4`), { force: true }),
+      fsp.rm(path.join(config.PRIVATE_VIDEOS_DIR, `${id}.webm`), { force: true }),
+      // Anything still held at the scan gate.
+      fsp.rm(path.join(config.PENDING_VIDEOS_DIR, `${id}.mp4`), { force: true }),
+      fsp.rm(path.join(config.PENDING_VIDEOS_DIR, `${id}.webm`), { force: true }),
+      fsp.rm(path.join(config.PENDING_THUMBS_DIR, `${id}.jpg`), { force: true }),
       fsp.rm(path.join(config.TUS_DIR, id), { force: true }),
       fsp.rm(path.join(config.TUS_DIR, `${id}.json`), { force: true }),
     ]);
 
-    // Drop the Sia copy too. Once files are served from Sia, removing only
-    // the local one would leave a deleted file still loading for everyone.
-    await mirror.purge(job);
+    // Returned, not swallowed: s3d reports 'deleted' and means it, while S5
+    // manages 'unpinned' at best. The caller needs to know which it got before
+    // telling a user their file is gone.
+    const storage = await mirror.purge(job);
 
     await jobs.remove(id);
-    return res.json({ deleted: id });
+    return res.json({ deleted: id, storage });
   } catch (err) {
     return next(err);
   }

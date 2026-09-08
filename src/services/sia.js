@@ -6,32 +6,13 @@ const config = require('../config');
 const logger = require('./logger');
 
 /*
-|--------------------------------------------------------------------------
-| Sia object store
-|--------------------------------------------------------------------------
+| Sia s3d via the ordinary S3 SDK. No Sia-specific client because
+| @siafoundation/indexd-js ships API bindings only, with no upload or download.
 |
-| Talks to Sia Storage through its s3d gateway using the ordinary S3 SDK. There
-| is deliberately no Sia-specific client here: as of September 2026
-| @siafoundation/indexd-js ships API bindings only (authConnect, hosts, slabs,
-| slabPin, slabDelete) with no upload or download, so S3 is the only route into
-| the network from Node that actually works.
-|
-| Keys mirror the on-disk layout one for one:
-|
-|   public/images/<ULID>.webp      private/images/<ULID>.webp
-|   public/videos/<ULID>.mp4       private/videos/<ULID>.mp4
-|   public/audio/<ULID>.m4a        private/audio/<ULID>.m4a
-|   public/thumbnails/<ULID>.jpg
-|
-| Two reasons for that shape. Keeping the ULID means serey-api's video id
-| derivation, delete-by-id and visibility regexes all keep working if we ever
-| serve from here. Keeping public/ and private/ apart means a future public
-| gateway can be scoped to public/ alone, instead of exposing every paywalled
-| file in the bucket the day someone opens it up.
-|
-| Every export is a no-op when SIA_ENABLED is false, so the service runs
-| unchanged on a box with no credentials.
-|
+| Keys mirror the on-disk layout: <visibility>/<kind>/<ULID>.<ext>. Keeping the
+| ULID means serey-api's id derivation and delete-by-id keep working; keeping
+| public/ and private/ apart means a future public gateway can be scoped to
+| public/ alone instead of exposing every paywalled file in the bucket.
 */
 
 let client = null;
@@ -48,14 +29,15 @@ function enabled() {
   );
 }
 
-// Required lazily so the SDK is never loaded (and never has to be installed) on
-// a deployment that does not use the mirror.
+// Lazy so the SDK need not even be installed on a deployment that skips s3d.
 function getClient() {
   if (client) return client;
   // eslint-disable-next-line global-require
   const s3 = require('@aws-sdk/client-s3');
   // eslint-disable-next-line global-require
   ({ Upload } = require('@aws-sdk/lib-storage'));
+  // eslint-disable-next-line global-require
+  const { NodeHttpHandler } = require('@smithy/node-http-handler');
   commands = s3;
   client = new s3.S3Client({
     endpoint: config.SIA_S3_ENDPOINT,
@@ -66,12 +48,20 @@ function getClient() {
     },
     // s3d addresses buckets by path, not by DNS subdomain.
     forcePathStyle: true,
+    // The SDK ships no request timeout at all, and the publish lane is
+    // concurrency 1, so one hung socket would stall everything behind it.
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: config.SIA_S3_CONNECT_TIMEOUT_MS,
+      requestTimeout: config.SIA_S3_REQUEST_TIMEOUT_MS,
+    }),
+    // s3d is not AWS: if it lacks flexible checksums it rejects the CRC32
+    // headers the SDK sends by default. 'when_required' is the way out.
+    requestChecksumCalculation: config.SIA_S3_CHECKSUMS,
+    responseChecksumValidation: config.SIA_S3_CHECKSUMS,
   });
   return client;
 }
 
-// kind is the URL segment already used everywhere else: videos, audio, images,
-// thumbnails. visibility is public or private.
 function buildKey({ kind, file, visibility = 'public' }) {
   return `${visibility}/${kind}/${file}`;
 }
@@ -88,21 +78,15 @@ function contentTypeFor(file) {
   return CONTENT_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
 }
 
-/*
-| Upload a published file. Uses lib-storage's Upload rather than a plain
-| PutObject so a 2GB video becomes a multipart upload automatically when video
-| joins the mirror, instead of one request that s3d would reject.
-|
-| Returns { key, bytes }.
-*/
+// lib-storage's Upload rather than PutObject, so a 2GB video becomes a
+// multipart upload instead of one request s3d would reject.
 async function putFile({ key, filePath }) {
   if (!enabled()) throw new Error('sia_not_configured');
   const { size } = await fsp.stat(filePath);
 
-  // getClient() must run before Upload is referenced: it is what lazily loads
-  // lib-storage and populates the binding. `new Upload(...)` resolves the callee
-  // before evaluating its arguments, so inlining getClient() below would read
-  // Upload while it is still null.
+  // Must run before Upload is referenced: it is what populates the binding.
+  // `new Upload(...)` resolves the callee first, so inlining this below would
+  // read Upload while it is still null.
   const s3 = getClient();
   const upload = new Upload({
     client: s3,
@@ -119,8 +103,7 @@ async function putFile({ key, filePath }) {
   return { key, bytes: size };
 }
 
-// Returns { bytes } or null when the object is not there. Used by the verify
-// script to prove the backup is actually present, not merely recorded.
+// null when absent. Proves the backup is present, not merely recorded.
 async function headObject(key) {
   if (!enabled()) throw new Error('sia_not_configured');
   try {
@@ -142,8 +125,8 @@ async function getToFile({ key, filePath }) {
   );
 
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  // Write to a temp name and rename, so an interrupted restore can never leave
-  // a truncated file sitting where a valid one is expected.
+  // Temp name then rename, so an interrupted restore cannot leave a truncated
+  // file where a valid one is expected.
   const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.restore`);
   await new Promise((resolve, reject) => {
     const w = fs.createWriteStream(tmpPath);
@@ -163,12 +146,9 @@ async function deleteObject(key) {
   );
 }
 
-/*
-| Move an object between the public/ and private/ prefixes. S3 has no rename, so
-| this is a server side copy followed by a delete. If the delete fails we keep
-| the new key and log: a duplicate object costs disk, whereas returning failure
-| after a successful copy would leave the caller thinking nothing moved.
-*/
+// S3 has no rename, so this is a copy then a delete. A failed delete keeps the
+// new key and logs: a duplicate costs disk, whereas failing after a successful
+// copy would leave the caller thinking nothing moved.
 async function moveObject({ fromKey, toKey }) {
   if (!enabled()) throw new Error('sia_not_configured');
   if (fromKey === toKey) return { key: toKey };

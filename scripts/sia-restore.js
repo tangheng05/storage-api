@@ -11,6 +11,7 @@
 const fsp = require('fs/promises');
 const jobs = require('../src/services/jobs');
 const sia = require('../src/services/sia');
+const s5 = require('../src/services/s5');
 const mirror = require('../src/services/mirror');
 
 const { localPathFor, fileFromJob } = mirror;
@@ -31,8 +32,8 @@ const exists = async (p) => {
 };
 
 async function restoreOne(job) {
-  if (!job.sia_key) {
-    console.log(`  ${job.id}  skipped, no sia_key`);
+  if (!job.sia_key && !job.s5_cid) {
+    console.log(`  ${job.id}  skipped, on no backend`);
     return false;
   }
 
@@ -43,18 +44,22 @@ async function restoreOne(job) {
   }
   const filePath = localPathFor(job, file);
   if (DRY) {
-    console.log(`  ${job.id}  would restore ${job.sia_key} -> ${filePath}`);
+    console.log(`  ${job.id}  would restore ${job.s5_cid || job.sia_key} -> ${filePath}`);
     return true;
   }
 
-  const { bytes } = await sia.getToFile({ key: job.sia_key, filePath });
+  // S5 restores verify themselves: the CID is the hash, so a corrupted
+  // download is detected rather than silently written over a good file.
+  const { bytes } = job.s5_cid
+    ? await s5.getToFile({ cid: job.s5_cid, filePath })
+    : await sia.getToFile({ key: job.sia_key, filePath });
   console.log(`  ${job.id}  restored ${bytes} bytes -> ${filePath}`);
   return true;
 }
 
 async function main() {
-  if (!sia.enabled()) {
-    console.error('Sia is not configured (SIA_ENABLED / credentials).');
+  if (!sia.enabled() && !s5.enabled()) {
+    console.error('No storage backend configured (SIA_ENABLED / S5_ENABLED).');
     process.exit(2);
   }
   if (!ID && !ALL) {
@@ -71,7 +76,7 @@ async function main() {
     }
     targets = [job];
   } else {
-    const ready = jobs.listByState(['ready']).filter((j) => j.sia_key && j.url);
+    const ready = jobs.listByState(['ready']).filter((j) => (j.sia_key || j.s5_cid) && j.url);
     targets = [];
     for (const job of ready) {
       const file = fileFromJob(job);

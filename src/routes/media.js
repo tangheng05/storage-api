@@ -12,18 +12,16 @@ const mirror = require('../services/mirror');
 
 const router = express.Router();
 
-// Only these kinds have a private counterpart. Video *thumbnails* stay public
-// on purpose: a locked card still shows its poster. Uploaded images do not get
-// that exemption — an image is the content on an image post, so leaving it
-// public would hand away the very thing the paywall is protecting.
+// Video thumbnails stay public on purpose (a locked card still shows its
+// poster). Uploaded images do not: the image *is* the content of an image post.
 const KINDS = {
   videos: { public: config.VIDEOS_DIR, private: config.PRIVATE_VIDEOS_DIR },
   audio: { public: config.AUDIO_DIR, private: config.PRIVATE_AUDIO_DIR },
   images: { public: config.IMAGES_DIR, private: config.PRIVATE_IMAGES_DIR },
 };
 
-// <ULID><ext>. Anchored, and the extension cannot contain a dot or slash, so a
-// filename can never walk out of its directory.
+// Anchored, and the extension holds no dot or slash, so a filename can never
+// walk out of its directory.
 const FILE_RE = /^([0-9A-HJKMNP-TV-Z]{26})(\.[A-Za-z0-9]{1,5})$/;
 
 const parseFile = (kind, file) => {
@@ -43,19 +41,9 @@ const exists = async (p) => {
   }
 };
 
-/*
-|--------------------------------------------------------------------------
-| Change an object's visibility
-|--------------------------------------------------------------------------
-|
-| Master key only — serey-api calls this when a creator marks a video or episode
-| Premium (or back to Public). The file moves between the public and private
-| directory; a rename on the same volume, so no bytes are copied and no URL is
-| valid for both states at once.
-|
-| Idempotent: asking for the state it is already in is a success.
-|
-*/
+// Master key only. Moves the file between the public and private dir — a
+// rename on the same volume, so no URL is valid for both states at once.
+// Idempotent.
 router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
   const target = String(req.body?.visibility || '').toLowerCase();
   if (!['public', 'private'].includes(target)) {
@@ -73,6 +61,31 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
   const from = path.join(target === 'private' ? dirs.public : dirs.private, file);
   const to = path.join(target === 'private' ? dirs.private : dirs.public, file);
 
+  /*
+  | Public -> premium is refused on S5: there is no private path there and a CID
+  | already handed out is fetchable forever, so the move would rotate the URL and
+  | leave the bytes wide open behind a paywall that believes it works.
+  |
+  | It has to be explicit. serey-api's helper returns null for a URL it does not
+  | recognise and its caller only catches throws, so otherwise the row keeps its
+  | public URL, the post gets hidden from non-subscribers, and nothing is logged.
+  */
+  if (target === 'private') {
+    let job = null;
+    try {
+      job = await jobs.get(id);
+    } catch { /* unreadable record; fall through to the ordinary path */ }
+    if (job && job.storage_backend === 's5') {
+      logger.warn({ id, kind: req.params.kind }, 'refused premium flip for s5-published media');
+      return res.status(409).json({
+        error: 'immutable_public_media',
+        message:
+          'This file was published to public storage and cannot be made premium. '
+          + 'Re-upload it as premium to paywall it.',
+      });
+    }
+  }
+
   try {
     const alreadyLocal = await exists(to);
 
@@ -85,12 +98,9 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
       await fs.rename(from, to);
     }
 
-    // Reconcile the Sia copy onto the matching prefix. This runs even when the
-    // local file was already in place, and that is the whole point: if a
-    // previous call moved the file locally but its Sia move failed, an early
-    // return here would leave a now-premium object sitting under public/ for
-    // good, where a public gateway would serve it to anyone. Retrying the call
-    // has to be able to finish the job.
+    // Runs even when the local file was already in place: if an earlier call
+    // moved it locally but failed on s3d, returning early here would leave a
+    // premium object under public/ for good. A retry has to be able to finish.
     const siaPatch = await reconcileSia({
       id,
       kind: req.params.kind,
@@ -98,8 +108,7 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
       target,
     });
 
-    // Best effort: the job record is metadata, not the source of truth for
-    // delivery. A missing job must not fail the move.
+    // The job record is metadata, not the source of truth for delivery.
     try {
       await jobs.update(id, { visibility: target, ...siaPatch });
     } catch {}
@@ -119,17 +128,8 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
   }
 });
 
-/*
-| Move the Sia object to the prefix matching the new visibility.
-|
-| Skipped entirely for anything that was never mirrored: legacy files that
-| predate Sia, and media types not in SIA_MIRROR_TYPES, have no object to move
-| and would otherwise log a 404 warning on every flip.
-|
-| Never throws. The local rename is what actually enforces the paywall today, so
-| a Sia hiccup must not fail the request; it is recorded as 'failed' and the
-| caller can simply retry the endpoint, which now reconciles properly.
-*/
+// Never throws: the local rename is what enforces the paywall, so an s3d
+// hiccup is recorded as 'failed' and the caller can retry the endpoint.
 async function reconcileSia({ id, kind, file, target }) {
   if (!sia.enabled()) return {};
 
@@ -137,58 +137,50 @@ async function reconcileSia({ id, kind, file, target }) {
   try {
     job = await jobs.get(id);
   } catch {
-    // Unreadable job record; treat as never mirrored.
+    // Unreadable job record; treat as never published.
   }
-  if (!job || !job.sia_key) return {};
+  // Only s3d objects move; S5 has no prefixes to move between.
+  if (!job || job.storage_backend !== 's3d' || !job.sia_key) return {};
 
   const toKey = sia.buildKey({ kind, file, visibility: target });
-  if (job.sia_key === toKey && job.sia_state === 'mirrored') return {};
+  if (job.sia_key === toKey && job.mirror_state === 'published') return {};
 
   try {
     await sia.moveObject({ fromKey: job.sia_key, toKey });
-    return { sia_key: toKey, sia_state: 'mirrored', sia_error: null };
+    return { sia_key: toKey, mirror_state: 'published', mirror_error: null };
   } catch (err) {
     logger.warn(
       { id, fromKey: job.sia_key, toKey, err: err.message },
-      'sia visibility move failed, object left on old prefix',
+      's3d visibility move failed, object left on old prefix',
     );
-    return { sia_state: 'failed', sia_error: err.message };
+    return { mirror_state: 'failed', mirror_error: err.message };
   }
 }
 
-/*
-| Private objects are always served from local disk through the signed /media/
-| path, so they keep PUBLIC_BASE_URL. A public object that lives on Sia has to
-| report its Sia URL, otherwise flipping a video back to Public would silently
-| move that row off Sia and onto local delivery.
-*/
+// Private objects always go through the signed /media/ path, so they keep
+// PUBLIC_BASE_URL.
 async function buildUrlFor(id, kind, visibility, file) {
   if (visibility === 'private') {
     return `${config.PUBLIC_BASE_URL}/media/${kind}/${file}`;
   }
-  if (mirror.serving()) {
-    try {
-      const job = await jobs.get(id);
-      if (job && job.sia_served) return `${config.SIA_PUBLIC_BASE_URL}/${kind}/${file}`;
-    } catch {
-      // Fall through to the local URL, which always works.
+  try {
+    const job = await jobs.get(id);
+    // Only for a file actually published to a backend, so flipping back to
+    // Public cannot silently move that row onto local delivery.
+    if (job && job.mirror_state === 'published') {
+      const url = mirror.publicUrl(job.storage_backend, kind, file);
+      if (url) return url;
     }
+  } catch {
+    // Fall through to the local URL, which always works.
   }
   return `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Signed delivery of a private object
-|--------------------------------------------------------------------------
-|
-| GET /media/videos/<ulid>.mp4?exp=<unix>&sig=<hmac>
-|
-| No membership logic here by design: serey-api decides who is entitled and
-| proves it with a signature. This service only checks that the signature is
-| ours and still fresh.
-|
-*/
+// GET /media/videos/<ulid>.mp4?exp=<unix>&sig=<hmac>
+//
+// No membership logic by design: serey-api decides who is entitled and proves
+// it with a signature. We only check the signature is ours and still fresh.
 router.get('/:kind/:file', async (req, res) => {
   const parsed = parseFile(req.params.kind, req.params.file);
   if (!parsed) {
@@ -205,8 +197,8 @@ router.get('/:kind/:file', async (req, res) => {
   });
 
   if (!result.ok) {
-    // Same status for forged, expired and missing signatures, and for files that
-    // do not exist — probing must not reveal which premium ids are real.
+    // Same status for forged, expired, missing and nonexistent: probing must
+    // not reveal which premium ids are real.
     logger.warn({ object_path, reason: result.reason }, 'signed media rejected');
     return res.status(403).json({ error: 'Forbidden' });
   }
@@ -216,8 +208,7 @@ router.get('/:kind/:file', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  // Never let a CDN or shared proxy keep a copy: the URL is per viewer and the
-  // whole protection collapses if an intermediary caches the response.
+  // The URL is per viewer; the protection collapses if a proxy caches it.
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
 

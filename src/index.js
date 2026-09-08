@@ -12,6 +12,10 @@ const logger = require('./services/logger');
   config.PRIVATE_VIDEOS_DIR,
   config.PRIVATE_AUDIO_DIR,
   config.PRIVATE_IMAGES_DIR,
+  config.PENDING_VIDEOS_DIR,
+  config.PENDING_AUDIO_DIR,
+  config.PENDING_IMAGES_DIR,
+  config.PENDING_THUMBS_DIR,
 ].forEach((dir) => {
   fs.mkdirSync(dir, { recursive: true });
 });
@@ -33,11 +37,8 @@ setInterval(() => {
 app.listen(config.PORT, () => {
   logger.info({ port: config.PORT, base_url: config.PUBLIC_BASE_URL }, 'serey video storage api started');
 
-  // Deferred on purpose. These jobs are already 'ready' and serving correctly;
-  // they just never made it onto Sia, so this is durability catch-up with no
-  // user waiting on it. listByState scans and parses every job file
-  // synchronously, and doing that before listen would hold up accepting
-  // uploads for as long as the scan takes.
+  // Deferred: listByState parses every job file synchronously, and these jobs
+  // are already serving correctly, so nothing waits on this.
   setImmediate(() => {
     try {
       mirror.recoverOnBoot();

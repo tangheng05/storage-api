@@ -11,24 +11,24 @@
 const fsp = require('fs/promises');
 const jobs = require('../src/services/jobs');
 const sia = require('../src/services/sia');
+const s5 = require('../src/services/s5');
 const mirror = require('../src/services/mirror');
 
-// Path and filename resolution live in mirror.js so this script and the service
-// can never disagree about where a file is supposed to be.
+// Shared with the service so the two cannot disagree about where a file is.
 const { localPathFor, fileFromJob } = mirror;
 
 const FIX = process.argv.includes('--fix');
 
 
 async function main() {
-  if (!sia.enabled()) {
-    console.error('Sia is not configured (SIA_ENABLED / credentials). Nothing to verify.');
+  if (!sia.enabled() && !s5.enabled()) {
+    console.error('No storage backend configured (SIA_ENABLED / S5_ENABLED). Nothing to verify.');
     process.exit(2);
   }
 
   const all = jobs.listByState(['ready']);
-  const tracked = all.filter((j) => j.sia_key);
-  const untracked = all.filter((j) => !j.sia_key && j.sia_state !== 'skipped');
+  const tracked = all.filter((j) => j.sia_key || j.s5_cid);
+  const untracked = all.filter((j) => !j.sia_key && !j.s5_cid && j.mirror_state !== 'skipped');
 
   let ok = 0;
   const problems = [];
@@ -37,7 +37,7 @@ async function main() {
     const file = fileFromJob(job);
     if (!file) {
       // A malformed record must not abort a scheduled run.
-      problems.push({ id: job.id, key: job.sia_key, issue: 'job has no usable url' });
+      problems.push({ id: job.id, key: job.s5_cid || job.sia_key, issue: 'job has no usable url' });
       continue;
     }
 
@@ -45,24 +45,27 @@ async function main() {
     try {
       localBytes = (await fsp.stat(localPathFor(job, file))).size;
     } catch {
-      // Local file gone. Not drift on its own — that is what the backup is for.
+      // Local file gone: not drift on its own, that is what the backup is for.
     }
 
+    const ref = job.s5_cid || job.sia_key;
     let remote = null;
     try {
-      remote = await sia.headObject(job.sia_key);
+      remote = job.s5_cid
+        ? await s5.exists(job.s5_cid)
+        : await sia.headObject(job.sia_key);
     } catch (err) {
-      problems.push({ id: job.id, key: job.sia_key, issue: `head failed: ${err.message}` });
+      problems.push({ id: job.id, key: ref, issue: `head failed: ${err.message}` });
       continue;
     }
 
     if (!remote) {
-      problems.push({ id: job.id, key: job.sia_key, issue: 'missing on sia' });
-    } else if (localBytes !== null && remote.bytes !== localBytes) {
+      problems.push({ id: job.id, key: ref, issue: 'missing on backend' });
+    } else if (localBytes !== null && remote.bytes !== null && remote.bytes !== localBytes) {
       problems.push({
         id: job.id,
-        key: job.sia_key,
-        issue: `size mismatch local=${localBytes} sia=${remote.bytes}`,
+        key: ref,
+        issue: `size mismatch local=${localBytes} remote=${remote.bytes}`,
       });
     } else {
       ok += 1;
@@ -71,7 +74,7 @@ async function main() {
 
   console.log(`checked ${tracked.length} tracked object(s): ${ok} ok, ${problems.length} problem(s)`);
   if (untracked.length) {
-    console.log(`${untracked.length} ready job(s) have no sia_key (state: failed/pending or predate the mirror)`);
+    console.log(`${untracked.length} ready job(s) are on no backend (failed, or predate it — run sia-backfill.js)`);
   }
   problems.forEach((p) => console.log(`  ${p.id}  ${p.key}  ${p.issue}`));
 

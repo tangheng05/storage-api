@@ -30,6 +30,8 @@ process.env.SIA_S3_BUCKET = 'serey';
 process.env.SIA_S3_ACCESS_KEY = 'ak';
 process.env.SIA_S3_SECRET_KEY = 'sk';
 process.env.SIA_PUBLIC_BASE_URL = 'https://cdn.test.local';
+// s3d only: S5 would otherwise claim the public image path (see mirror.backendFor).
+process.env.S5_ENABLED = 'false';
 
 const store = new Map();
 const uploads = new Map();
@@ -134,7 +136,7 @@ async function main() {
   });
   check('publish returns the Sia URL', pub.url === `https://cdn.test.local/images/${ID}.webp`);
   check('key is namespaced under public/', pub.patch.sia_key === `public/images/${ID}.webp`);
-  check('state is mirrored', pub.patch.sia_state === 'mirrored');
+  check('state is mirrored', pub.patch.mirror_state === 'published');
 
   const head = await sia.headObject(pub.patch.sia_key);
   check('remote size matches local', head.bytes === smallBytes.length);
@@ -184,7 +186,7 @@ async function main() {
     id: ID, kind: 'images', mediaType: 'image', file: `${ID}.webp`, filePath: small,
   });
   check('outage returns no URL so the caller keeps local', failed.url === null);
-  check('outage is recorded as failed, not thrown', failed.patch.sia_state === 'failed');
+  check('outage is recorded as failed, not thrown', failed.patch.mirror_state === 'failed');
 
   stub.close();
   console.log(`\n${passed} checks passed`);
