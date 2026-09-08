@@ -464,6 +464,33 @@ async function main() {
   ok('a safety block counts as a reject',
     (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
 
+  // 2.5 omits safetyRatings when nothing trips. That must read as clean, not as
+  // a broken scanner -- treating it as an error held every upload in 'scanning'.
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'cat' }] } }] }),
+  });
+  const unflagged = await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  ok('a successful generation with no ratings is clean', unflagged.verdict === 'clean');
+  ok('and it says so rather than reporting a score of nothing',
+    (unflagged.labels || []).includes('unflagged'));
+
+  // an empty response is still an error, so a malformed reply cannot pass
+  global.fetch = async () => ({ ok: true, json: async () => ({}) });
+  await assert.rejects(
+    () => scan.scanFile({ filePath: small, mediaType: 'image', immutable: false }),
+    /neither a candidate nor safetyRatings/,
+  );
+  ok('an empty response is an error, not a pass', true);
+
+  // finishReason SAFETY is a reject even without ratings
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ candidates: [{ finishReason: 'SAFETY' }] }),
+  });
+  ok('finishReason SAFETY counts as a reject',
+    (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
+
   global.fetch = keepFetch2;
   cfg2.SCAN_PROVIDERS = keepProv;
 

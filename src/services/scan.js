@@ -288,15 +288,31 @@ async function runGemini(filePath) {
   }
 
   // Ratings live on the candidate normally, or on promptFeedback when the input
-  // itself tripped something. A hard block is itself a strong signal, so it
-  // scores 1 rather than erroring.
-  const ratings = body?.candidates?.[0]?.safetyRatings
-    || body?.promptFeedback?.safetyRatings
-    || [];
-  if (body?.promptFeedback?.blockReason === 'SAFETY' && !ratings.length) {
+  // itself tripped something.
+  const candidate = body?.candidates?.[0];
+  const ratings = candidate?.safetyRatings || body?.promptFeedback?.safetyRatings || [];
+
+  // A block is the strongest signal there is, so it scores 1 rather than
+  // erroring.
+  if (body?.promptFeedback?.blockReason === 'SAFETY' || candidate?.finishReason === 'SAFETY') {
     return { provider: 'gemini', score: 1, labels: ['blocked'] };
   }
-  if (!ratings.length) throw new Error('gemini returned no safetyRatings');
+
+  if (!ratings.length) {
+    /*
+    | 2.5 omits safetyRatings entirely when nothing is flagged, so on an
+    | otherwise successful generation their absence means nothing tripped.
+    |
+    | This is an inference from missing data, which is worth being careful
+    | about: requiring a real candidate first means a malformed or empty
+    | response is still an error rather than a silent pass, and phash runs
+    | alongside regardless. If Google changes the shape again, the symptom is
+    | this provider going quiet rather than loud -- worth re-checking against a
+    | known-explicit image if you ever depend on it alone.
+    */
+    if (candidate) return { provider: 'gemini', score: 0, labels: ['unflagged'] };
+    throw new Error('gemini returned neither a candidate nor safetyRatings');
+  }
 
   let score = 0;
   let label = null;
