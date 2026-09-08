@@ -11,31 +11,62 @@ const logger = require('./logger');
 /*
 | S5 object store — public media only.
 |
-| A blob's CID is its BLAKE3 hash, so we compute it locally and never parse an
-| upload response, which matters because the docs specify neither endpoint's
-| response body. It also makes retries idempotent. The cost: tus uploads need
-| the hash up front, so large files are read twice.
+| A blob's CID is its BLAKE3 hash, so the same bytes always produce the same
+| identifier and a retry is idempotent. We compute it locally but prefer the CID
+| the node reports, because the documented byte layout turned out to be wrong
+| (see CID_MAGIC). The cost: tus needs the hash up front, so large files are
+| read twice.
 |
 | Publishing here cannot be undone. Premium media goes to s3d (sia.js), which
 | has a private prefix and a working delete.
 */
 
 const BLAKE3_MULTIHASH = 0x1e;
-const CID_MAGIC = [0x5b, 0x82];
+
+/*
+| Verified against a live s5-dart v0.14.1 node, NOT against the spec.
+|
+| docs.sfive.net documents a blob CID as 0x5b 0x82 0x1e + hash + size rendered
+| base16 with an 'f' multibase prefix. A real node returns 0x26 0x1f + hash +
+| size rendered base58btc with 'z'. The hash and the size encoding match the
+| spec exactly; only the magic and the multibase differ.
+|
+| So the spec is wrong here, or describes a version nothing ships. Either way
+| putFile prefers the CID the node reports and only falls back to this, and
+| stat() confirms the result is retrievable before any publish is reported --
+| a mismatch fails the upload rather than writing a dead URL into a post row.
+*/
+const CID_MAGIC = [0x26, 0x1f];
+
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58btc(buf) {
+  let n = 0n;
+  for (const b of buf) n = n * 256n + BigInt(b);
+  let out = '';
+  while (n > 0n) {
+    out = B58[Number(n % 58n)] + out;
+    n /= 58n;
+  }
+  for (const b of buf) {
+    if (b !== 0) break;
+    out = `1${out}`;
+  }
+  return out;
+}
 
 function enabled() {
   return config.S5_ENABLED && !!config.S5_NODE_URL && !!config.S5_AUTH_TOKEN;
 }
 
 /*
-| Base16 with multibase prefix 'f':
-|   byte 0-1  0x5b 0x82   magic
-|   byte 2    0x1e        BLAKE3
-|   byte 3-34 the hash
-|   byte 35+  size, little endian, trailing zero bytes trimmed
+| base58btc with multibase prefix 'z':
+|   byte 0-1  0x26 0x1f   magic (see CID_MAGIC)
+|   byte 2-33 the BLAKE3 hash
+|   byte 34+  size, little endian, trailing zero bytes trimmed
 |
-| The test pins this against the spec's published vector. Keep it: nothing else
-| would catch an off-by-one here.
+| The test pins this against a CID a real node returned. Keep it: nothing else
+| would catch an off-by-one, and the spec cannot be used as the reference.
 */
 function buildCid(hash, size) {
   const sizeBytes = [];
@@ -44,8 +75,7 @@ function buildCid(hash, size) {
     sizeBytes.push(remaining % 256);
     remaining = Math.floor(remaining / 256);
   }
-  const body = Buffer.from([...CID_MAGIC, BLAKE3_MULTIHASH, ...hash, ...sizeBytes]);
-  return `f${body.toString('hex')}`;
+  return `z${base58btc(Buffer.from([...CID_MAGIC, ...hash, ...sizeBytes]))}`;
 }
 
 // Streamed so a 2GB video is never held in memory.
@@ -89,8 +119,14 @@ async function uploadSmall(filePath) {
   if (!res.ok) {
     throw new Error(`s5 upload failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
   }
-  // Body ignored: undocumented, and the CID is already known.
-  await res.text().catch(() => '');
+  // A real node answers { "cid": "z..." }. The spec documents no response body,
+  // so this is best effort — null just means fall back to the computed CID.
+  try {
+    const body = await res.json();
+    return typeof body?.cid === 'string' ? body.cid : null;
+  } catch {
+    return null;
+  }
 }
 
 // The node will not hash for us, so it goes in the creation metadata. That
@@ -161,22 +197,40 @@ async function uploadTus(filePath, { size, hash }) {
   if (offset !== size) {
     throw new Error(`s5 tus incomplete: sent ${offset} of ${size}`);
   }
+  // Nothing documents whether the final PATCH carries a CID. Ask the upload
+  // resource; a null just falls back to the computed one.
+  try {
+    const head = await request(target, { method: 'HEAD', headers: authHeaders({ 'tus-resumable': '1.0.0' }) }, 30000);
+    const cid = head.headers.get('x-s5-cid') || head.headers.get('upload-cid');
+    return cid || null;
+  } catch {
+    return null;
+  }
 }
 
-// Idempotent: the CID comes from the bytes, so a retry reuses the identifier.
+/*
+| Idempotent: the same bytes produce the same CID, so a retry re-uploads to the
+| same identifier rather than making a second object.
+|
+| The node's own CID wins when it gives one. Ours is a reconstruction of a
+| format the spec gets wrong, so it is the fallback, not the source of truth --
+| and either way stat() proves the object is really there before we report a
+| publish. Without that check a wrong CID becomes a permanently dead URL in a
+| serey-api post row.
+*/
 async function putFile({ filePath }) {
   if (!enabled()) throw new Error('s5_not_configured');
-  const { cid, hash, size } = await hashFile(filePath);
+  const { cid: computed, hash, size } = await hashFile(filePath);
 
-  if (size <= config.S5_SMALL_MAX_BYTES) {
-    await uploadSmall(filePath);
-  } else {
-    await uploadTus(filePath, { size, hash });
+  const reported = size <= config.S5_SMALL_MAX_BYTES
+    ? await uploadSmall(filePath)
+    : await uploadTus(filePath, { size, hash });
+
+  const cid = reported || computed;
+  if (reported && reported !== computed) {
+    logger.warn({ reported, computed }, 's5 CID differs from ours, trusting the node');
   }
 
-  // The CID is computed locally and the upload responses are undocumented, so
-  // without this a wrong tus hash encoding would look like success and freeze a
-  // dead URL into a serey-api post row permanently.
   if (!(await stat(cid))) {
     throw new Error(`s5 upload reported success but ${cid} is not retrievable`);
   }

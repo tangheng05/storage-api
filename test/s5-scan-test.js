@@ -155,18 +155,21 @@ async function main() {
   await new Promise((r) => stub.listen(PORT, r));
 
   // --- CID construction ---
-  // The spec's published vector for "Hello, world!".
-  const { blake3 } = require('@noble/hashes/blake3');
-  const vector = s5.buildCid(blake3(Buffer.from('Hello, world!')), 13);
+  // Pinned against a CID a live s5-dart v0.14.1 node returned for a 72254-byte
+  // file. Deliberately NOT the spec's published vector: the documented magic
+  // prefix and multibase are both wrong, and this is the only reference that
+  // reflects what a node actually serves.
+  const realHash = '5d2ccbaead70e96d3e4df4645da9cd0d62e42463a17241e7955c61a04ea4ca76';
   ok(
-    'CID matches the published BLAKE3 vector',
-    vector === 'f5b821eede5c0b10f2ec4979c69b52f61e42ff5b413519ce09be0f14d098dcfe5f6f98d0d',
+    'CID matches one a real S5 node returned',
+    s5.buildCid(Buffer.from(realHash, 'hex'), 72254)
+      === 'z2H76rXxCUD8Luc5sJxjJxNFkYhp1Fqewe3h19CUDkxw5mfPBNV6',
   );
 
   const small = path.join(root, 'small.webp');
   await makeImage(small, 3);
   const hashed = await s5.hashFile(small);
-  ok('CID is derived locally before any upload', /^f5b821e[0-9a-f]+$/.test(hashed.cid));
+  ok('CID is derived locally before any upload', /^z[1-9A-HJ-NP-Za-km-z]+$/.test(hashed.cid));
   ok('hashing reports the real byte length', hashed.size === fs.statSync(small).size);
 
   // --- upload paths ---
@@ -192,7 +195,11 @@ async function main() {
   await s5.getToFile({ cid: bigPut.cid, filePath: restored });
   ok('restore is byte-identical', fs.readFileSync(restored).equals(fs.readFileSync(big)));
   await assert.rejects(
-    () => s5.getToFile({ cid: vector, filePath: path.join(root, 'bad.bin') }),
+    // A CID that does not describe the bytes the stub will serve back.
+    () => s5.getToFile({
+      cid: s5.buildCid(Buffer.from(realHash, 'hex'), 72254),
+      filePath: path.join(root, 'bad.bin'),
+    }),
     /hash mismatch/,
   );
   ok('restore refuses bytes that do not match the CID', true);
@@ -313,7 +320,7 @@ async function main() {
   });
 
   const pub = await call('GET', `/cdn/images/${ULID_A}.webp`);
-  ok('cdn resolves a public job to its CID', pub.status === 302 && /f5b821e/.test(pub.location));
+  ok('cdn resolves a public job to its CID', pub.status === 302 && /\/z/.test(pub.location));
 
   // /cdn is unauthenticated, so this check is the only thing between a premium
   // CID and an anonymous caller.
