@@ -7,8 +7,9 @@
 | paths, backend routing, thresholds, and above all that a file failing the scan
 | never reaches a served directory or a backend.
 |
-| It does NOT prove a real S5 node behaves this way: the upload response shape,
-| the tus hash metadata encoding and the unpin route are all undocumented.
+| The CID vector, the tus hash metadata and the upload response shape were all
+| confirmed against a live s5-dart v0.14.1 node (see scripts/s5-probe-tus.js).
+| The unpin route remains undocumented and unproven.
 */
 const http = require('http');
 const fs = require('fs');
@@ -320,7 +321,7 @@ async function main() {
   });
 
   const pub = await call('GET', `/cdn/images/${ULID_A}.webp`);
-  ok('cdn resolves a public job to its CID', pub.status === 302 && /\/z/.test(pub.location));
+  ok('cdn serves a public job from S5', pub.status === 200);
 
   // /cdn is unauthenticated, so this check is the only thing between a premium
   // CID and an anonymous caller.
@@ -335,8 +336,8 @@ async function main() {
   await jobs.create(ULID_T, {
     state: 'ready', media_type: 'video', visibility: 'private', s5_thumb_cid: 'fcafebabe',
   });
-  ok('cdn still resolves a premium video thumbnail',
-    (await call('GET', `/cdn/thumbnails/${ULID_T}.jpg`)).status === 302);
+  ok('cdn still serves a premium video thumbnail',
+    (await call('GET', `/cdn/thumbnails/${ULID_T}.jpg`)).status === 200);
 
   const ULID_Q = '01J0000000000000000000000F';
   await jobs.create(ULID_Q, { state: 'scanning', media_type: 'image', s5_cid: 'fbadbad' });

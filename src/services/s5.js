@@ -248,6 +248,25 @@ function downloadUrl(cid) {
   return `${base}/${cid}`;
 }
 
+/*
+| Fetch a blob for /cdn to stream on to the viewer.
+|
+| The download route needs the bearer token — anonymous requests 404, and
+| enabling [accounts] to open it up only moves the problem to an account-token
+| flow the docs do not specify. So the token stays here and we proxy, which also
+| means the node never has to be reachable from the internet.
+|
+| Range is forwarded so video seeking still works, and the caller gets the
+| upstream response untouched so it can mirror status and headers.
+*/
+async function fetchBlob(cid, { range } = {}) {
+  if (!enabled()) throw new Error('s5_not_configured');
+  return request(downloadUrl(cid), {
+    method: 'GET',
+    headers: authHeaders(range ? { range } : {}),
+  });
+}
+
 // Ranged GET rather than HEAD: the docs do not commit to HEAD being supported.
 // The body is cancelled rather than read — a node that ignores Range would
 // otherwise make the verify script download every object in full.
@@ -318,4 +337,5 @@ module.exports = {
   getToFile,
   unpin,
   downloadUrl,
+  fetchBlob,
 };

@@ -16,10 +16,16 @@ port = 5050
 # never regenerate it casually.
 # seed = "..."
 
-[accounts]
-enabled = true
-# What works without a token. Uploads must NOT be in here.
-alwaysAllowedScopes = ["registry_read", "metadata"]
+# Leave accounts OFF. Enabling them stops the admin key working on the download
+# route (401), and the account-token flow that replaces it is challenge/response
+# that the docs never actually specify a request body for.
+#
+# It does not matter for us: the storage API proxies public media through /cdn
+# with the admin key server-side, so the node needs no anonymous access and no
+# public hostname at all. Downloads by CID require auth either way.
+#
+# [accounts]
+# enabled = true
 
 [database]
 path = "/db"

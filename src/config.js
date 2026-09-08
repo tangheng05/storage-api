@@ -138,9 +138,12 @@ module.exports = {
   // freezes these into post rows permanently, so never let a raw CID or a
   // portal domain into one.
   MEDIA_CDN_BASE_URL: trimSlash(process.env.MEDIA_CDN_BASE_URL) || `${PUBLIC_BASE_URL}/cdn`,
-  // Short: this caches the ULID -> CID mapping, not the bytes, and a delete or
-  // a visibility change has to be able to take effect.
-  MEDIA_CDN_CACHE_SEC: num(process.env.MEDIA_CDN_CACHE_SEC, 300),
+  // How long the edge may keep a public media response. The bytes are content
+  // addressed and never change, but the ULID that names them can be deleted, so
+  // this is the window a takedown takes to disappear from Cloudflare. An hour
+  // trades a little bandwidth for a takedown that actually lands; purge the CF
+  // cache too if you need it immediate.
+  MEDIA_CDN_CACHE_SEC: num(process.env.MEDIA_CDN_CACHE_SEC, 3600),
 
   // The gate is at publication, not at the storage push: exposure comes from
   // serving the bytes, so a failed file must not be reachable anywhere.

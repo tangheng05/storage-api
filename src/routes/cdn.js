@@ -1,4 +1,6 @@
 const express = require('express');
+const path = require('path');
+const { Readable } = require('stream');
 const config = require('../config');
 const jobs = require('../services/jobs');
 const s5 = require('../services/s5');
@@ -6,21 +8,37 @@ const logger = require('../services/logger');
 
 const router = express.Router();
 
-// Resolves a stable ULID URL to wherever the bytes live:
-//   https://cdn.serey.io/videos/01J....mp4  ->  302  ->  S5 node /<CID>
+// Serves public media under a stable ULID URL, fetching it from S5 by CID:
+//   /cdn/videos/01J....mp4  ->  S5 node /<CID>  ->  streamed to the viewer
 //
 // serey-api freezes these strings into post rows permanently, so a raw CID
 // would commit the platform to S5 for the life of the post. With the ULID in
 // the path the backend stays swappable and deleting the job stops the URL
-// resolving. In production cdn.serey.io maps / to /cdn/.
+// resolving.
+//
+// Proxied rather than redirected because the node's download route requires the
+// bearer token: a browser sent there anonymously gets a 404, and opening it up
+// via [accounts] needs an account-token flow the S5 docs never specify. Keeping
+// the token here also means the node needs no public hostname at all.
 
 const KINDS = ['videos', 'audio', 'images', 'thumbnails'];
+
+const CONTENT_TYPES = {
+  '.webp': 'image/webp',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.m4a': 'audio/mp4',
+  '.jpg': 'image/jpeg',
+};
 
 // Anchored, and the extension holds no dot or slash, so a filename can never
 // walk out of its namespace.
 const FILE_RE = /^([0-9A-HJKMNP-TV-Z]{26})(\.[A-Za-z0-9]{1,5})$/;
 
-router.get('/:kind/:file', async (req, res) => {
+router.all('/:kind/:file', async (req, res) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
   const { kind } = req.params;
   if (!KINDS.includes(kind)) return res.status(404).json({ error: 'Not found' });
 
@@ -54,11 +72,40 @@ router.get('/:kind/:file', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
-  // The blob is immutable but this *mapping* is not: a delete or a visibility
-  // change has to take effect. Caching the redirect at the edge would keep
-  // serving a taken-down file for the whole TTL, so keep it short and private.
-  res.set('Cache-Control', `private, max-age=${config.MEDIA_CDN_CACHE_SEC}`);
-  return res.redirect(302, s5.downloadUrl(cid));
+  let upstream;
+  try {
+    upstream = await s5.fetchBlob(cid, { range: req.headers.range });
+  } catch (err) {
+    logger.error({ id, kind, cid, err: err.message }, 'cdn fetch from s5 failed');
+    return res.status(502).json({ error: 'Upstream unavailable' });
+  }
+
+  if (!upstream.ok && upstream.status !== 206) {
+    if (upstream.body) await upstream.body.cancel().catch(() => {});
+    logger.error({ id, kind, cid, status: upstream.status }, 'cdn upstream refused');
+    return res.status(502).json({ error: 'Upstream unavailable' });
+  }
+
+  // Content addressed bytes cannot change, so the blob itself is safe to cache
+  // forever — Cloudflare then serves it once per edge instead of once per
+  // viewer, which is what keeps proxying affordable. The ULID -> CID mapping is
+  // NOT immutable, but a deleted job stops resolving above, before we get here.
+  res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}, immutable`);
+  res.set('Content-Type', CONTENT_TYPES[path.extname(req.params.file).toLowerCase()]
+    || 'application/octet-stream');
+  // Range support, so video seeking works through the proxy.
+  res.set('Accept-Ranges', 'bytes');
+  for (const h of ['content-length', 'content-range']) {
+    const v = upstream.headers.get(h);
+    if (v) res.set(h, v);
+  }
+  res.status(upstream.status === 206 ? 206 : 200);
+
+  if (req.method === 'HEAD' || !upstream.body) {
+    if (upstream.body) await upstream.body.cancel().catch(() => {});
+    return res.end();
+  }
+  return Readable.fromWeb(upstream.body).pipe(res);
 });
 
 module.exports = router;
