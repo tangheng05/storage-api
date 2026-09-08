@@ -94,6 +94,16 @@ const upload = new tus.Upload(stream, {
         console.log('FAILED:', job.error);
         process.exit(2);
       }
+      // Also terminal. Without these the poller spins to its cap on a
+      // moderation decision and reports it as a timeout.
+      if (job.state === 'rejected') {
+        console.log('REJECTED:', job.error);
+        process.exit(3);
+      }
+      if (job.state === 'review') {
+        console.log('HELD FOR REVIEW — approve it at /moderation to publish');
+        process.exit(4);
+      }
       await new Promise((r) => setTimeout(r, 1000));
     }
   },
