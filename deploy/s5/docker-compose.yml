@@ -1,41 +1,54 @@
-# S5 node — content-addressed storage for PUBLIC media.
+# Public media storage: S5 for content addressing, s3d for the bytes.
 #
-# Runs on the same VPS as the storage API. Two hostnames matter and they are not
-# the same one:
+#   storage API -> S5 node -> [store.s3] -> s3d -> Sia network
 #
-#   S5_NODE_URL          how the storage API uploads   -> http://127.0.0.1:5050
-#   S5_DOWNLOAD_BASE_URL where the BROWSER fetches     -> https://s5.serey.io
+# S5 gives CIDs, verified streaming and lookup. It holds nothing itself: where
+# the bytes land is [store] in its config.toml. Pointing that at s3d puts them
+# on Sia, erasure-coded across independent hosts and encrypted client-side, so
+# no host and no gateway ever sees plaintext.
 #
-# /cdn 302-redirects the browser at the download host, so it has to be publicly
-# reachable. Point s5.serey.io at 127.0.0.1:5050 with another NPM proxy host.
+# Both containers share a network, so S5 reaches s3d at http://s3d:8000 and
+# neither port needs publishing. The S5 API is published on the docker bridge
+# only, because Nginx Proxy Manager runs in its own container and cannot reach
+# 127.0.0.1 on the host.
 #
-# State lives under /var/lib/s5, deliberately outside the checkout: /config
-# holds a keypair seed that cannot be regenerated, and a redeploy into a fresh
-# directory would strand it.
-#
-# Where the bytes land is [store] in config.toml, and it is the decision that
-# decides whether any of this buys durability. See config.example.toml.
+# State lives under /var/lib, deliberately outside the checkout:
+#   /var/lib/s5/config/config.toml   an unrecoverable keypair seed
+#   /var/lib/s3d/s3d.yml             the 12-word recovery phrase
+# BACK BOTH UP. Losing the s3d phrase loses access to everything on Sia.
 
 services:
   s5:
     image: ghcr.io/s5-dev/node:latest
     container_name: s5-node
     restart: unless-stopped
-    # Localhost only. Everything public goes through the reverse proxy.
+    depends_on:
+      - s3d
+    # NPM is containerised, so it cannot reach 127.0.0.1 on the host. 172.18.0.1
+    # is the bridge gateway; check yours with `docker network inspect`.
     ports:
-      - "127.0.0.1:5050:5050"
+      - "172.18.0.1:5050:5050"
     volumes:
-      # config.toml is generated here on first boot; edit it, then restart.
       - /var/lib/s5/config:/config
-      # Node state. Put this on SSD.
       - /var/lib/s5/db:/db
-      # Upload/download staging.
       - /var/lib/s5/cache:/cache
-      # Only used by the local filesystem store. Harmless otherwise, and it
-      # means switching [store] to local needs no compose change.
+      # Only used by the local filesystem store. Keep it mounted so switching
+      # [store] back for a test needs no compose change.
       - /var/lib/s5/data:/data
     logging:
       driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      options: { max-size: "10m", max-file: "3" }
+
+  s3d:
+    image: ghcr.io/siafoundation/s3d:master
+    container_name: s3d
+    restart: unless-stopped
+    # Not published: only S5 talks to it, over the compose network. Run the CLI
+    # with `docker compose run --rm s3d <command>`.
+    expose:
+      - "8000"
+    volumes:
+      - /var/lib/s3d:/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
