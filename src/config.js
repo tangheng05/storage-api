@@ -171,7 +171,7 @@ module.exports = {
   // with no API to enable.
   SCAN_GEMINI_API_KEY: process.env.SCAN_GEMINI_API_KEY || '',
   // Whatever your key has access to. Flash models are the cheap ones.
-  SCAN_GEMINI_MODEL: process.env.SCAN_GEMINI_MODEL || 'gemini-2.0-flash',
+  SCAN_GEMINI_MODEL: process.env.SCAN_GEMINI_MODEL || 'gemini-2.5-flash',
   SCAN_GEMINI_CATEGORIES: csv(
     process.env.SCAN_GEMINI_CATEGORIES,
     'HARM_CATEGORY_SEXUALLY_EXPLICIT,HARM_CATEGORY_DANGEROUS_CONTENT',
