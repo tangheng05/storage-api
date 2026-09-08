@@ -97,11 +97,13 @@ const upload = new tus.Upload(stream, {
       // Also terminal. Without these the poller spins to its cap on a
       // moderation decision and reports it as a timeout.
       if (job.state === 'rejected') {
-        console.log('REJECTED:', job.error);
+        console.log('REJECTED:', job.error, (job.scan_reasons || []).join(', '));
         process.exit(3);
       }
+      // Legacy: nothing produces 'review' any more, but a job written before the
+      // single-threshold gate can still be in it until the boot sweep re-decides.
       if (job.state === 'review') {
-        console.log('HELD FOR REVIEW — approve it at /moderation to publish');
+        console.log('HELD FOR REVIEW — a pre-existing job, restart to re-decide it');
         process.exit(4);
       }
       await new Promise((r) => setTimeout(r, 1000));

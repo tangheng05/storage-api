@@ -32,18 +32,29 @@ async function probe(filePath) {
   return meta;
 }
 
-// Converts any supported input to WebP, downscaled to fit MAX_IMAGE_DIMENSION.
+// Normalises an upload without changing its format when we recognise it.
+//
+// jpeg, png and webp are kept as they arrived, because an uploader who chose
+// PNG for a screenshot or JPEG for a photo made a reasonable choice and a
+// silent re-encode to WebP is not ours to make. Everything else -- gif, tiff,
+// avif, heic -- becomes WebP, because those are either huge or unsupported by
+// enough browsers to be a liability. Returns the extension actually written.
 //
 // .rotate() with no argument applies the EXIF orientation tag and then drops
 // it, so the pixels are physically upright. Without it every portrait photo
-// from a phone publishes sideways, because WebP has no orientation tag for a
-// viewer to honour. It must come before .resize() or the cap would be applied
-// to the pre-rotation width/height.
+// from a phone publishes sideways. It must come before .resize() or the cap
+// would be applied to the pre-rotation width/height.
 //
-// EXIF is not copied to the output (sharp's default), which also strips GPS
-// coordinates — uploaders should not be publishing their home address with a
-// photo of their lunch.
-async function toWebp(srcPath, destPath, meta) {
+// EXIF is not copied to the output (sharp's default) whichever format we write,
+// which also strips GPS coordinates -- uploaders should not be publishing their
+// home address with a photo of their lunch.
+const KEEP_FORMAT = { jpeg: '.jpg', png: '.png', webp: '.webp' };
+
+function extensionFor(meta) {
+  return KEEP_FORMAT[meta.format] || '.webp';
+}
+
+async function normalise(srcPath, destPath, meta) {
   const animated = ANIMATED_FORMATS.includes(meta.format) && meta.pages > 1;
 
   let pipeline = sharp(srcPath, { ...baseOptions(), animated });
@@ -52,18 +63,29 @@ async function toWebp(srcPath, destPath, meta) {
   // would corrupt the frame layout, so only stills get the rotate step.
   if (!animated) pipeline = pipeline.rotate();
 
-  await pipeline
-    .resize({
-      width: config.MAX_IMAGE_DIMENSION,
-      height: config.MAX_IMAGE_DIMENSION,
-      fit: 'inside',          // preserve aspect ratio, cap the long edge
-      withoutEnlargement: true, // never upscale a small image into a big file
-    })
-    .webp({
-      quality: config.IMAGE_WEBP_QUALITY,
+  pipeline = pipeline.resize({
+    width: config.MAX_IMAGE_DIMENSION,
+    height: config.MAX_IMAGE_DIMENSION,
+    fit: 'inside',          // preserve aspect ratio, cap the long edge
+    withoutEnlargement: true, // never upscale a small image into a big file
+  });
+
+  const ext = extensionFor(meta);
+  if (ext === '.jpg') {
+    // JPEG has no alpha; a transparent source would otherwise go black.
+    pipeline = pipeline.flatten({ background: '#ffffff' })
+      .jpeg({ quality: config.IMAGE_QUALITY, mozjpeg: true });
+  } else if (ext === '.png') {
+    pipeline = pipeline.png({ compressionLevel: 9 });
+  } else {
+    pipeline = pipeline.webp({
+      quality: config.IMAGE_QUALITY,
       effort: 4, // encode speed vs. size; 4 is the useful knee of the curve
-    })
-    .toFile(destPath);
+    });
+  }
+
+  await pipeline.toFile(destPath);
+  return ext;
 }
 
 // Dimensions of the file we actually published, which differ from the input
@@ -73,4 +95,4 @@ async function publishedSize(filePath) {
   return { width, height };
 }
 
-module.exports = { probe, toWebp, publishedSize };
+module.exports = { probe, normalise, extensionFor, publishedSize };

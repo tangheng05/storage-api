@@ -25,6 +25,8 @@ const KINDS = ['videos', 'audio', 'images', 'thumbnails'];
 
 const CONTENT_TYPES = {
   '.webp': 'image/webp',
+  '.png': 'image/png',
+  '.jpeg': 'image/jpeg',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.m4a': 'audio/mp4',

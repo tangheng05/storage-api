@@ -9,6 +9,9 @@ const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middl
 
 const router = express.Router();
 
+// Every extension convertImage can write. See services/image.js.
+const IMAGE_EXTENSIONS = ['.webp', '.jpg', '.png'];
+
 function validateId(req, res, next) {
   if (!jobs.ULID_REGEX.test(req.params.id)) {
     return res.status(400).json({ error: 'Invalid image id' });
@@ -33,6 +36,7 @@ router.get('/:id/status', validateId, async (req, res, next) => {
       id, state, url, error, width, height, filename,
       s5_cid: mirror.publicCid(job),
       scan_reasons: scan.publicReasons(job),
+      scan_message: scan.publicMessage(job),
     });
   } catch (err) {
     return next(err);
@@ -51,13 +55,14 @@ router.delete('/:id', requireUploadKey, validateId, async (req, res, next) => {
     if (requester && job.owner && requester !== job.owner) {
       return res.status(403).json({ error: 'Not the owner of this image' });
     }
+    // An image keeps its own extension now, so every one it could have been
+    // written under is removed. Only one ever exists; guessing from the job
+    // record would strand the file whenever that record is stale.
+    const dirs = [config.IMAGES_DIR, config.PRIVATE_IMAGES_DIR, config.PENDING_IMAGES_DIR];
     await Promise.all([
-      fsp.rm(path.join(config.IMAGES_DIR, `${id}.webp`), { force: true }),
-      // Only one of the two ever exists; remove both rather than trust the
-      // job's visibility, so a stale record cannot strand the file on disk.
-      fsp.rm(path.join(config.PRIVATE_IMAGES_DIR, `${id}.webp`), { force: true }),
-      // Anything still held at the scan gate.
-      fsp.rm(path.join(config.PENDING_IMAGES_DIR, `${id}.webp`), { force: true }),
+      ...dirs.flatMap((dir) => IMAGE_EXTENSIONS.map(
+        (ext) => fsp.rm(path.join(dir, `${id}${ext}`), { force: true }),
+      )),
       fsp.rm(path.join(config.TUS_DIR, id), { force: true }),
       fsp.rm(path.join(config.TUS_DIR, `${id}.json`), { force: true }),
     ]);

@@ -82,7 +82,9 @@ module.exports = {
   MAX_IMAGE_BYTES: num(process.env.MAX_IMAGE_BYTES, 20 * 1024 * 1024),
   // Long-edge cap. Never upscales.
   MAX_IMAGE_DIMENSION: num(process.env.MAX_IMAGE_DIMENSION, 2560),
-  IMAGE_WEBP_QUALITY: num(process.env.IMAGE_WEBP_QUALITY, 82),
+  // Lossy quality for whichever of webp/jpeg we write. PNG is lossless and
+  // ignores it.
+  IMAGE_QUALITY: num(process.env.IMAGE_QUALITY || process.env.IMAGE_WEBP_QUALITY, 82),
   // Guards against decompression bombs: a few-KB PNG can expand to gigapixels.
   MAX_IMAGE_PIXELS: num(process.env.MAX_IMAGE_PIXELS, 100 * 1000 * 1000),
 
@@ -185,7 +187,7 @@ module.exports = {
   SCAN_VISION_API_KEY: process.env.SCAN_VISION_API_KEY || '',
   // Which SafeSearch categories count. Only 'adult' and 'violence' by default.
   // 'racy' fires on swimwear, tight clothing and a lot of ordinary photography,
-  // so it would fill the review queue with nothing; 'medical' fires on
+  // so it would refuse a great deal of nothing; 'medical' fires on
   // legitimate health content; 'spoof' just means "looks like a meme". Add them
   // only if you want that traffic.
   SCAN_VISION_CATEGORIES: csv(process.env.SCAN_VISION_CATEGORIES, 'adult,violence'),
@@ -206,14 +208,16 @@ module.exports = {
   SCAN_VIDEO_FRAMES: num(process.env.SCAN_VIDEO_FRAMES, 1),
   SCAN_HTTP_KEY: process.env.SCAN_HTTP_KEY || '',
   SCAN_HTTP_KEY_HEADER: process.env.SCAN_HTTP_KEY_HEADER || 'authorization',
-  // Score bands, 0..1: reject refuses, review holds for a human.
-  SCAN_REJECT_SCORE: num(process.env.SCAN_REJECT_SCORE, 0.9),
-  SCAN_REVIEW_SCORE: num(process.env.SCAN_REVIEW_SCORE, 0.6),
-  // S5 cannot be undone, so its review band is wider -- but the reject band is
-  // the same. Nothing legitimate should ever be auto-deleted; borderline
-  // content waits for a person instead.
-  SCAN_REJECT_SCORE_IMMUTABLE: num(process.env.SCAN_REJECT_SCORE_IMMUTABLE, 0.9),
-  SCAN_REVIEW_SCORE_IMMUTABLE: num(process.env.SCAN_REVIEW_SCORE_IMMUTABLE, 0.5),
+  // The single score, 0..1, at or above which an upload is refused. There is no
+  // review band: with no human in the loop, a borderline file is refused and the
+  // uploader is told the category, rather than published and unretractable.
+  //
+  // These defaults are what the review band used to start at, NOT the old
+  // reject scores -- raising them back to 0.9 would publish everything the old
+  // gate held for a person.
+  SCAN_REJECT_SCORE: num(process.env.SCAN_REJECT_SCORE, 0.6),
+  // Stricter for S5, because that publish cannot be undone.
+  SCAN_REJECT_SCORE_IMMUTABLE: num(process.env.SCAN_REJECT_SCORE_IMMUTABLE, 0.5),
   // Fail closed: a broken scanner holds the job in 'scanning' for retry rather
   // than publishing it unchecked.
   SCAN_FAIL_OPEN: process.env.SCAN_FAIL_OPEN === 'true',

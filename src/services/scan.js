@@ -20,7 +20,7 @@ const logger = require('./logger');
 | destroys smuggled payloads before this sees the file.
 */
 
-const VERDICT = { CLEAN: 'clean', REVIEW: 'review', REJECT: 'reject' };
+const VERDICT = { CLEAN: 'clean', REJECT: 'reject' };
 
 /*
 | Every classifier is a remote call that can blip. Free-tier Gemini in
@@ -181,14 +181,13 @@ async function runHttp(filePath, { mediaType }) {
   throw new Error('scanner response had no verdict, score or scores');
 }
 
-// `immutable`: an S5 publish cannot be undone, so its middle band goes to a
-// human. On s3d a mistake is one deleteObject call.
+// One threshold, no middle ground: there is no human to hand a borderline file
+// to, so it is refused rather than published. `immutable` is stricter because an
+// S5 publish cannot be undone -- a wrong refusal costs the uploader one attempt
+// and tells them why, while a wrong publish is permanent and public.
 function decide(score, { immutable }) {
   const reject = immutable ? config.SCAN_REJECT_SCORE_IMMUTABLE : config.SCAN_REJECT_SCORE;
-  const review = immutable ? config.SCAN_REVIEW_SCORE_IMMUTABLE : config.SCAN_REVIEW_SCORE;
-  if (score >= reject) return VERDICT.REJECT;
-  if (score >= review) return VERDICT.REVIEW;
-  return VERDICT.CLEAN;
+  return score >= reject ? VERDICT.REJECT : VERDICT.CLEAN;
 }
 
 /*
@@ -196,9 +195,9 @@ function decide(score, { immutable }) {
 | no dependency -- and 1000 images/month free.
 |
 | It answers with likelihood words, not numbers, so they are mapped onto the
-| score bands. With the default thresholds that means only VERY_LIKELY is auto
-| rejected and LIKELY waits for a person: deliberately lenient, because a false
-| reject deletes a real user's upload and a false review costs a click.
+| score bands. With the default thresholds that means LIKELY and above are
+| refused. A false reject costs a real user one upload and tells them the
+| category, which is the trade made when there is no person to appeal to.
 */
 const LIKELIHOOD = {
   VERY_UNLIKELY: 0,
@@ -360,7 +359,7 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
 
   // Highest verdict wins; among equals the highest score, so a clean pass still
   // records what it actually scored.
-  const rank = { clean: 0, review: 1, reject: 2 };
+  const rank = { clean: 0, reject: 1 };
   const worst = results.reduce((acc, r) => {
     if (!acc) return r;
     if (rank[r.verdict] !== rank[acc.verdict]) return rank[r.verdict] > rank[acc.verdict] ? r : acc;
@@ -385,7 +384,7 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
 }
 
 /*
-| What an uploader is told when their file is refused or held.
+| What an uploader is told when their file is refused.
 |
 | Providers encode the score into the label ('sexual:87'), and handing that
 | number back teaches a determined uploader exactly where the threshold sits, so
@@ -399,7 +398,7 @@ const REASON_ALIASES = {
 };
 
 function publicReasons(job) {
-  if (!job || (job.state !== 'rejected' && job.state !== 'review')) return null;
+  if (!job || job.state !== 'rejected') return null;
   const labels = Array.isArray(job.scan_labels) ? job.scan_labels : [];
   const categories = [...new Set(
     labels.map((label) => String(label).split(':')[0].trim()).filter(Boolean),
@@ -409,6 +408,46 @@ function publicReasons(job) {
   return categories.length ? categories : ['unspecified'];
 }
 
+/*
+| The same refusal as a sentence a person can read.
+|
+| `publicReasons` stays the machine-readable half: slugs are what a bilingual
+| frontend maps onto its own Khmer and English strings. This is the fallback for
+| anything that has no mapping yet, so a refused upload is never a bare code.
+*/
+const REASON_TEXT = {
+  sexual: 'nudity or sexual content',
+  violence: 'graphic violence or injury',
+  weapons: 'weapons',
+  unsafe: 'material the classifier would not assess',
+};
+
+// Refusals that are not about what the picture shows, so 'appears to contain'
+// would be wrong.
+const STANDALONE = {
+  previously_removed: 'This file matches one that was removed before, so it cannot be uploaded again.',
+  no_thumbnail: 'We could not read a frame from this video to check it, so it was not accepted.',
+  unspecified: 'This file did not pass our content check.',
+};
+
+const NOUNS = { image: 'image', video: 'video', audio: 'file' };
+
+function publicMessage(job) {
+  const reasons = publicReasons(job);
+  if (!reasons) return null;
+
+  const standalone = reasons.find((reason) => STANDALONE[reason]);
+  if (standalone) return STANDALONE[standalone];
+
+  const parts = reasons.map((reason) => REASON_TEXT[reason]).filter(Boolean);
+  if (!parts.length) return STANDALONE.unspecified;
+
+  const list = parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return `This ${NOUNS[job.media_type] || 'file'} appears to contain ${list}, so it was not accepted.`;
+}
+
 module.exports = {
-  scanFile, perceptualHash, decide, enabled, VERDICT, publicReasons,
+  scanFile, perceptualHash, decide, enabled, VERDICT, publicReasons, publicMessage,
 };

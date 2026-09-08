@@ -4,8 +4,8 @@ const path = require('path');
 const config = require('../config');
 
 // Job state store: one JSON file per video id under JOBS_DIR.
-// States: uploading -> queued -> processing -> scanning -> ready | review |
-// rejected | failed
+// States: uploading -> queued -> processing -> scanning -> ready | rejected |
+// failed. There is no 'review': the gate decides on a single threshold.
 
 const ULID_REGEX = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 

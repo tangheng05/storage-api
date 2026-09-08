@@ -149,10 +149,13 @@ async function convertAudio(id, src, probe) {
 }
 
 async function convertImage(id, src, meta) {
-  const ext = '.webp';
+  // jpeg, png and webp keep the extension they arrived with; anything else
+  // becomes webp. Decided before the write so the temp file and the final name
+  // cannot disagree.
+  const ext = image.extensionFor(meta);
   const pendingPath = path.join(config.PENDING_IMAGES_DIR, `${id}${ext}`);
   const tmpPath = path.join(config.PENDING_IMAGES_DIR, `.${id}.tmp${ext}`);
-  await withOneRetry(id, () => image.toWebp(src, tmpPath, meta));
+  await withOneRetry(id, () => image.normalise(src, tmpPath, meta));
   await fsp.rename(tmpPath, pendingPath);
 
   // EXIF rotation and the long-edge cap both change this from the upload.
@@ -202,15 +205,16 @@ async function runScan(id, job) {
     // An image with no file is a broken job and should fail. A video with no
     // thumbnail is different: ffmpeg is allowed to fail on one, and treating
     // that as clean let an uploader skip the gate with a file whose frames do
-    // not decode. Holding it for a person is the honest answer — throwing here
-    // would park it in 'scanning' and retry the same missing frame hourly,
-    // forever, where nobody would ever see it.
+    // not decode. With nobody to hand it to, refusing is the only honest answer:
+    // publishing an unscanned video would put the one file the gate could not
+    // read on the far side of the gate. Throwing instead would park it in
+    // 'scanning' and retry the same missing frame hourly, forever.
     if (!isVideo) {
       throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
     }
-    logger.warn({ id }, 'no thumbnail to scan, holding video for review');
+    logger.warn({ id }, 'no thumbnail to scan, refusing video');
     return {
-      verdict: scan.VERDICT.REVIEW, provider: 'unscannable', score: null, labels: ['no_thumbnail'],
+      verdict: scan.VERDICT.REJECT, provider: 'unscannable', score: null, labels: ['no_thumbnail'],
     };
   }
 
@@ -232,7 +236,7 @@ async function withSampledFrames(id, job, primary, immutable) {
   const duration = job.duration_sec || 0;
   if (!extra || !duration) return primary;
 
-  const rank = { clean: 0, review: 1, reject: 2 };
+  const rank = { clean: 0, reject: 1 };
   const source = pendingPaths(job).file;
   let worst = primary;
 
@@ -324,9 +328,7 @@ async function publishCleared(id, job) {
   );
 }
 
-// `approved` skips the scanner for a job a moderator cleared: re-scoring would
-// only re-flag it with the score that held it.
-async function finalize(id, { approved = false } = {}) {
+async function finalize(id) {
   const job = await jobs.get(id);
   if (!job || !job.pending_file) return;
 
@@ -344,17 +346,12 @@ async function finalize(id, { approved = false } = {}) {
     return;
   }
 
-  // Persisted, not just passed: a restart between the moderator's decision and
-  // this task draining would otherwise re-scan and silently re-hold the file.
-  const cleared = approved || job.approved === true;
   let scanError = null;
   let result;
   // Only the scan is guarded. A publish failure must not be recorded as a
   // scanner outage, and must not re-enter this branch and publish a second time.
   try {
-    result = cleared
-      ? { verdict: scan.VERDICT.CLEAN, provider: 'moderator', score: null, labels: [] }
-      : await runScan(id, job);
+    result = await runScan(id, job);
   } catch (err) {
     if (scan.enabled() && !config.SCAN_FAIL_OPEN) {
       // An outage that delays uploads is cheaper than one bad file going live
@@ -393,13 +390,6 @@ async function finalize(id, { approved = false } = {}) {
     await discardPending(job);
     await jobs.update(id, { pending_file: null, pending_thumb: null });
     logger.warn({ id, labels: result.labels, matched: result.matched }, 'upload rejected by scan');
-    return;
-  }
-
-  if (result.verdict === scan.VERDICT.REVIEW) {
-    // Stays in pending: reachable by nobody, still there to approve.
-    await jobs.update(id, { ...patch, state: 'review' });
-    logger.info({ id, score: result.score, labels: result.labels }, 'upload held for review');
     return;
   }
 
@@ -473,8 +463,7 @@ function sweepHeld() {
     .forEach((job) => queue.push(() => finalize(job.id), queue.SCAN_LANE));
 }
 
-// 'uploading' is left to tus. 'review' is left to the moderator: re-scanning
-// would re-flag it and overwrite their queue entry.
+// 'uploading' is left to tus, which owns its own resumption.
 function recoverOnBoot() {
   // Oldest first: readdir order is unspecified, and with a recovery cap an
   // arbitrary subset would otherwise be retried forever while the rest starved.
@@ -485,12 +474,16 @@ function recoverOnBoot() {
     enqueue(job.id, job.media_type);
   });
 
+  // 'review' is a state nothing produces any more. Anything still parked in it
+  // predates the single-threshold gate and would otherwise sit there forever
+  // waiting for a queue that no longer exists, so it is re-decided instead. Its
+  // pending files were never discarded, so there is something to re-scan.
   jobs
-    .listByState(['scanning'])
+    .listByState(['scanning', 'review'])
     .sort(oldestFirst)
     .slice(0, config.SCAN_RECOVER_LIMIT)
     .forEach((job) => {
-      logger.info({ id: job.id }, 'recovering upload held at the scan gate');
+      logger.info({ id: job.id, state: job.state }, 'recovering upload held at the scan gate');
       queue.push(() => finalize(job.id), queue.SCAN_LANE);
     });
 }

@@ -31,6 +31,7 @@ router.get('/:id/status', validateId, async (req, res, next) => {
       id, state, url, error, duration_sec, filename,
       s5_cid: mirror.publicCid(job),
       scan_reasons: scan.publicReasons(job),
+      scan_message: scan.publicMessage(job),
     });
   } catch (err) {
     return next(err);

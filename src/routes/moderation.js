@@ -2,8 +2,6 @@ const express = require('express');
 const fsp = require('fs/promises');
 const config = require('../config');
 const jobs = require('../services/jobs');
-const processor = require('../services/processor');
-const queue = require('../services/queue');
 const scan = require('../services/scan');
 const logger = require('../services/logger');
 const { requireModerationKey } = require('../middleware/auth');
@@ -20,99 +18,19 @@ const appendHash = async (hash, id) => {
 };
 
 /*
-| Review queue. Master key only - operator endpoints, not user-facing.
+| Takedown tools. Master key only - operator endpoints, not user-facing.
 |
-| A scanner that can only auto-reject has to be tuned to almost never be wrong,
-| which in practice means tuned to let things through. The middle band lets it
-| be cautious instead, and this queue is what makes that band survivable.
+| There is no review queue: the gate decides on one threshold and there is
+| nobody to hand a borderline file to. What survives here is the after-the-fact
+| half, for content that got through and should not have.
 |
-| Rejecting here also blocklists the file's perceptual hash, so the same picture
-| is refused automatically from then on - no model, no API call, no cost.
+| Blocklisting records the file's perceptual hash, so the same picture is
+| refused automatically from then on - no model, no API call, no cost. Nothing
+| automatic ever writes to that list; only a person calling this route does.
 */
 
 router.use(requireModerationKey);
 
-// GET /moderation/queue — everything waiting on a human.
-router.get('/queue', async (req, res, next) => {
-  try {
-    const held = jobs.listByState(['review']).map((job) => ({
-      id: job.id,
-      media_type: job.media_type,
-      filename: job.filename,
-      owner: job.owner,
-      visibility: job.visibility || 'public',
-      score: job.scan_score,
-      labels: job.scan_labels || [],
-      provider: job.scan_provider,
-      phash: job.scan_phash,
-      created_at: job.created_at,
-      scanned_at: job.scanned_at,
-    }));
-    // Oldest first: the uploader kept waiting longest is next.
-    held.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-    return res.json({ count: held.length, items: held });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// POST /moderation/:id/approve — publishes a held file. The scan is skipped,
-// not re-run, and it goes on the scan lane so it cannot jump live uploads.
-router.post('/:id/approve', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const job = await jobs.get(id);
-    if (!job) return res.status(404).json({ error: 'Not found' });
-    if (job.state !== 'review') {
-      return res.status(409).json({ error: `Job is ${job.state}, not awaiting review` });
-    }
-
-    await jobs.update(id, {
-      state: 'scanning',
-      approved: true,
-      reviewed_by: req.headers['x-delete-owner'] || null,
-    });
-    queue.push(() => processor.finalize(id, { approved: true }), queue.SCAN_LANE);
-    logger.info({ id }, 'held upload approved by moderator');
-    return res.json({ id, state: 'scanning' });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// POST /moderation/:id/reject — discards it. { blocklist: false } opts out of
-// recording the perceptual hash.
-router.post('/:id/reject', async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const job = await jobs.get(id);
-    if (!job) return res.status(404).json({ error: 'Not found' });
-    if (job.state !== 'review') {
-      return res.status(409).json({ error: `Job is ${job.state}, not awaiting review` });
-    }
-
-    // State first: deleting the files before recording the decision left the job
-    // in 'review' pointing at bytes that no longer exist.
-    await jobs.update(id, {
-      state: 'rejected',
-      error: 'rejected_by_moderator',
-      reviewed_by: req.headers['x-delete-owner'] || null,
-    });
-    await processor.discardPending(job);
-    await jobs.update(id, { pending_file: null, pending_thumb: null });
-
-    const addToBlocklist = req.body?.blocklist !== false;
-    let blocklisted = false;
-    if (addToBlocklist && job.scan_phash) {
-      await appendHash(job.scan_phash, id);
-      blocklisted = true;
-    }
-    logger.info({ id, blocklisted }, 'held upload rejected by moderator');
-    return res.json({ id, state: 'rejected', blocklisted });
-  } catch (err) {
-    return next(err);
-  }
-});
 
 // POST /moderation/blocklist — takes a phash or the id of an already-published
 // job, so a takedown and preventing its return are one action. Deleting the
@@ -146,7 +64,7 @@ router.post('/blocklist', async (req, res, next) => {
 router.get('/stats', async (req, res, next) => {
   try {
     const counts = {};
-    ['ready', 'review', 'rejected', 'scanning', 'failed'].forEach((state) => {
+    ['ready', 'rejected', 'scanning', 'failed'].forEach((state) => {
       counts[state] = jobs.listByState([state]).length;
     });
     return res.json({
@@ -154,11 +72,8 @@ router.get('/stats', async (req, res, next) => {
       providers: config.SCAN_PROVIDERS,
       fail_open: config.SCAN_FAIL_OPEN,
       thresholds: {
-        mutable: { reject: config.SCAN_REJECT_SCORE, review: config.SCAN_REVIEW_SCORE },
-        immutable: {
-          reject: config.SCAN_REJECT_SCORE_IMMUTABLE,
-          review: config.SCAN_REVIEW_SCORE_IMMUTABLE,
-        },
+        mutable: { reject: config.SCAN_REJECT_SCORE },
+        immutable: { reject: config.SCAN_REJECT_SCORE_IMMUTABLE },
       },
       counts,
     });

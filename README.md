@@ -56,28 +56,27 @@ x-upload-key: <UPLOAD_API_KEY>
 ```
 
 `/moderation/*` takes its own `MODERATION_API_KEY` instead — the upload key is
-held by serey-api and CI, which should not be enough to approve held content or
-write the blocklist. Unset leaves those routes disabled (503).
+held by serey-api and CI, which should not be enough to write the blocklist.
+Unset leaves those routes disabled (503).
 
 ## API
 
 | Method | Path | Description |
 |---|---|---|
 | POST/PATCH/HEAD | `/files[/:id]` | tus 1.0.0 resumable upload endpoints (video or audio, by mimetype) |
-| GET | `/videos/:id/status` | `{ state, url?, thumbnail_url?, error? }` |
+| GET | `/videos/:id/status` | `{ state, url?, thumbnail_url?, error?, scan_reasons? }` |
 | DELETE | `/videos/:id` | Remove a video + thumbnail |
-| GET | `/audio/:id/status` | `{ state, url?, error? }` |
+| GET | `/audio/:id/status` | `{ state, url?, error?, scan_reasons? }` |
 | DELETE | `/audio/:id` | Remove an audio file |
-| GET | `/images/:id/status` | `{ state, url?, width?, height?, error? }` |
+| GET | `/images/:id/status` | `{ state, url?, width?, height?, error?, scan_reasons? }` |
 
-Job states: `uploading → queued → processing → scanning → ready | review |
-rejected | failed`. `review` means a human has to clear it; `rejected` means the
-scanner or a moderator refused it and the bytes were discarded.
+Job states: `uploading → queued → processing → scanning → ready | rejected |
+failed`. `rejected` means the scanner refused it and the bytes were discarded;
+`scan_reasons` carries the categories to show the uploader, without the scores
+behind them. There is no review state — the gate decides on a single threshold,
+so nothing waits on a person.
 | DELETE | `/images/:id` | Remove an image |
-| GET | `/moderation/queue` | Uploads the scanner held for a human (operator key) |
-| POST | `/moderation/:id/approve` | Publish a held upload without re-scoring it |
-| POST | `/moderation/:id/reject` | Discard it and blocklist its perceptual hash |
-| POST | `/moderation/blocklist` | Add a hash directly, by `phash` or job id |
+| POST | `/moderation/blocklist` | Blocklist a hash, by `phash` or job id (operator key) |
 | GET | `/moderation/stats` | Verdict counts and active thresholds, for tuning |
 | GET | `/cdn/:kind/:file` | Resolves a public ULID to its CID (302, no auth) |
 | GET | `/health` | Liveness check (no auth) |

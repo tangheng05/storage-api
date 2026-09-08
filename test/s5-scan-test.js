@@ -152,8 +152,10 @@ async function makeImage(dest, seed) {
     px[i * 3 + 1] = (i * seed * 7 + 40) % 253;
     px[i * 3 + 2] = (i * seed * 13 + 90) % 249;
   }
-  await sharp(px, { raw: { width: w, height: w, channels: 3 } }).webp().toFile(dest);
+  const enc = path.extname(dest) === '.png' ? 'png' : (path.extname(dest) === '.jpg' ? 'jpeg' : 'webp');
+  await sharp(px, { raw: { width: w, height: w, channels: 3 } })[enc]().toFile(dest);
 }
+
 
 async function main() {
   await new Promise((r) => stub.listen(PORT, r));
@@ -171,6 +173,19 @@ async function main() {
   );
 
   const small = path.join(root, 'small.webp');
+  // An uploader who chose PNG for a screenshot gets a PNG back; only formats we
+  // do not want to serve are re-encoded.
+  const image = require('../src/services/image');
+  for (const [ext, kept] of [['.png', true], ['.jpg', true], ['.webp', true]]) {
+    const probe = path.join(root, dirs.PENDING_IMAGES_DIR, `fmt${ext}`);
+    // eslint-disable-next-line no-await-in-loop
+    await makeImage(probe, 9);
+    // eslint-disable-next-line no-await-in-loop
+    const meta = await image.probe(probe);
+    ok(`${ext} keeps its format`, (image.extensionFor(meta) === ext) === kept);
+    fs.rmSync(probe, { force: true });
+  }
+
   await makeImage(small, 3);
   const hashed = await s5.hashFile(small);
   ok('CID is derived locally before any upload', /^z[1-9A-HJ-NP-Za-km-z]+$/.test(hashed.cid));
@@ -222,12 +237,12 @@ async function main() {
       === `https://cdn.test.local/images/${ULID_A}.webp`);
 
   // --- thresholds ---
-  // The middle band is the point: the same score must be treated more
-  // cautiously when there is no undo.
+  // One threshold, but not the same one: the score that publishes on a backend
+  // we can delete from must be refused on one we cannot.
   ok('a mid score publishes on a retractable backend',
     scan.decide(0.5, { immutable: false }) === 'clean');
-  ok('the same score is held for review when the publish is permanent',
-    scan.decide(0.5, { immutable: true }) === 'review');
+  ok('the same score is refused when the publish is permanent',
+    scan.decide(0.5, { immutable: true }) === 'reject');
   ok('a high score is rejected either way',
     scan.decide(0.95, { immutable: false }) === 'reject'
       && scan.decide(0.95, { immutable: true }) === 'reject');
@@ -270,7 +285,8 @@ async function main() {
   ok('a rejected upload is removed from pending', !fs.existsSync(blocked));
   ok('a rejected upload has no URL', !rejected.url);
 
-  // Held: kept in pending, still publishable later.
+  // A borderline score on a permanent destination: refused, not held, because
+  // there is no longer anyone to hold it for.
   const held = path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_C}.webp`);
   await makeImage(held, 47);
   await jobs.create(ULID_C, {
@@ -285,18 +301,13 @@ async function main() {
   await processor.finalize(ULID_C);
   global.fetch = realFetch;
   require('../src/config').SCAN_PROVIDERS = realProviders;
-  const review = await jobs.get(ULID_C);
-  ok('a mid-band upload is held for review', review.state === 'review');
-  ok('a held upload stays in pending, reachable by nobody', fs.existsSync(held));
-  ok('a held upload is not in the served dir',
+  const midBand = await jobs.get(ULID_C);
+  ok('a mid-band upload on a permanent backend is refused', midBand.state === 'rejected');
+  ok('and is told why', Array.isArray(scan.publicReasons(midBand)));
+  ok('a refused upload is discarded from pending', !fs.existsSync(held));
+  ok('a refused upload never reaches the served dir',
     !fs.existsSync(path.join(root, dirs.IMAGES_DIR, `${ULID_C}.webp`)));
-
-  // Approving publishes without re-scoring.
-  await processor.finalize(ULID_C, { approved: true });
-  const approved = await jobs.get(ULID_C);
-  ok('an approved upload publishes', approved.state === 'ready' && !!approved.s5_cid);
-  ok('an approved upload records the human decision', approved.scan_provider === 'moderator');
-  ok('an approved upload leaves pending', !fs.existsSync(held));
+  ok('a refused upload has no CID', !midBand.s5_cid);
 
   // --- paywall boundaries, over HTTP ---
   const app = require('../src/app');
@@ -370,8 +381,13 @@ async function main() {
     Array.isArray(rejStatus.scan_reasons) && rejStatus.scan_reasons.includes('previously_removed'));
   ok('but not the score behind it, which would teach the threshold',
     rejStatus.scan_reasons.every((r) => !String(r).includes(':')));
+  // The slug is for a frontend to localise; this is the fallback so a refusal is
+  // never shown to someone as a bare code.
+  ok('and a rejection carries a sentence a person can read',
+    typeof rejStatus.scan_message === 'string' && rejStatus.scan_message.length > 20);
   const cleanStatus = JSON.parse((await call('GET', `/images/${ULID_A}/status`)).text);
   ok('a clean upload reports no reasons at all', cleanStatus.scan_reasons === null);
+  ok('nor a message', cleanStatus.scan_message === null);
 
   const ULID_Q = '01J0000000000000000000000F';
   await jobs.create(ULID_Q, { state: 'scanning', media_type: 'image', s5_cid: 'fbadbad' });
@@ -438,11 +454,13 @@ async function main() {
   });
   await processor.finalize(ULID_V);
   const noThumb = await jobs.get(ULID_V);
-  ok('a video with no thumbnail is held for review', noThumb.state === 'review');
+  // Unscannable is refused, not published: the one file the gate could not read
+  // is the last one that should end up on the far side of it.
+  ok('a video with no thumbnail is refused', noThumb.state === 'rejected');
   ok('it is not published', !noThumb.url);
   ok('it says why', (noThumb.scan_labels || []).includes('no_thumbnail'));
-  ok('its pending file survives for the moderator',
-    fs.existsSync(path.join(root, dirs.PENDING_VIDEOS_DIR, `${ULID_V}.mp4`)));
+  ok('and the uploader is given that reason',
+    (scan.publicReasons(noThumb) || []).includes('no_thumbnail'));
 
   // --- vision likelihood mapping ---
   // SafeSearch answers in words; only VERY_LIKELY should ever auto-reject.
@@ -461,8 +479,8 @@ async function main() {
 
   ok('VERY_LIKELY adult is rejected',
     (await safeSearch({ adult: 'VERY_LIKELY', violence: 'VERY_UNLIKELY' })).verdict === 'reject');
-  ok('LIKELY adult goes to a human',
-    (await safeSearch({ adult: 'LIKELY', violence: 'VERY_UNLIKELY' })).verdict === 'review');
+  ok('LIKELY adult is refused too, with no human to defer to',
+    (await safeSearch({ adult: 'LIKELY', violence: 'VERY_UNLIKELY' })).verdict === 'reject');
   ok('POSSIBLE adult still publishes',
     (await safeSearch({ adult: 'POSSIBLE', violence: 'VERY_UNLIKELY' })).verdict === 'clean');
   // racy is not in SCAN_VISION_CATEGORIES by default, so it must not count
@@ -494,8 +512,8 @@ async function main() {
 
   ok('95 sexual is rejected',
     (await classified({ sexual: 95, violence: 0, weapons: 0 })).verdict === 'reject');
-  ok('70 goes to a human',
-    (await classified({ sexual: 70, violence: 0, weapons: 0 })).verdict === 'review');
+  ok('70 is refused',
+    (await classified({ sexual: 70, violence: 0, weapons: 0 })).verdict === 'reject');
   ok('30 still publishes',
     (await classified({ sexual: 30, violence: 0, weapons: 0 })).verdict === 'clean');
   ok('the worst configured category wins',

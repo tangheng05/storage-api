@@ -43,6 +43,8 @@ const exists = async (p) => {
 
 // States in which no file has been published yet, so a visibility change is
 // recorded on the job for finalize to honour rather than performed on disk.
+// 'review' is legacy: nothing produces it any more, but a job written before
+// the single-threshold gate can still be in it until the boot sweep re-decides.
 const PRE_PUBLICATION = ['uploading', 'queued', 'processing', 'scanning', 'review'];
 
 const prePublicationJob = async (id) => {
