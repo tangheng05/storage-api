@@ -34,13 +34,8 @@ const ALLOWED_AUDIO_TYPES = [
 ];
 const ALLOWED_AUDIO_EXT = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac'];
 
-// Everything sharp's bundled libvips can decode, minus two deliberate omissions:
-//   BMP  — not in the prebuilt libvips (needs the magick loader), so accepting
-//          it here would mean a clean 415 at create time turning into a much
-//          more confusing 'not_an_image' failure after a full upload.
-//   SVG  — it is a script-bearing document, not a photo. Rasterising untrusted
-//          SVG is an attack surface, and flattening it to WebP throws away the
-//          only reason to use it.
+// What sharp's bundled libvips decodes, minus BMP (not in the prebuilt libvips)
+// and SVG (rasterising untrusted SVG is an attack surface).
 const ALLOWED_IMAGE_TYPES = [
   'image/jpeg',
   'image/jpg',
@@ -49,8 +44,7 @@ const ALLOWED_IMAGE_TYPES = [
   'image/gif',
   'image/tiff',
   'image/avif',
-  // iPhone default since iOS 11. sharp's prebuilt libvips decodes these, so
-  // unlike HEVC video they need no transcode toolchain of their own.
+  // iPhone default since iOS 11; libvips decodes these natively.
   'image/heic',
   'image/heif',
   'image/heic-sequence',
@@ -60,7 +54,6 @@ const ALLOWED_IMAGE_EXT = [
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff', '.avif', '.heic', '.heif',
 ];
 
-// Which status route X-Status-Url should point the uploader at.
 const STATUS_PATHS = { video: 'videos', audio: 'audio', image: 'images' };
 
 const tusServer = new Server({
@@ -79,11 +72,9 @@ const tusServer = new Server({
   async onIncomingRequest(req, res, uploadId) {
     if (req.method === 'OPTIONS') return;
     if (isAuthorized(req)) return;
-    // POST (creating a new upload) has no uploadId yet and always requires the
-    // master key — only trusted server-to-server callers may create uploads.
-    // PATCH/HEAD on an existing upload may instead present the scoped token
-    // handed out at creation time (see onUploadCreate below), so browsers can
-    // PATCH chunks directly here without ever holding the master key.
+    // POST has no uploadId and always needs the master key. PATCH/HEAD may
+    // instead present the scoped token from creation, so a browser can send
+    // chunks without ever holding the master key.
     if (uploadId) {
       const job = await jobs.get(uploadId);
       if (job && job.state === 'uploading' && matchesUploadToken(req, job.upload_token)) {
@@ -111,26 +102,24 @@ const tusServer = new Server({
     let mediaType = 'video';
     if (isAudio) mediaType = 'audio';
     if (isImage) mediaType = 'image';
-    // The tus store's global maxSize is sized for video, so the much tighter
-    // image limit is enforced here — at create time, before a single byte is
-    // sent, rather than after a 200MB upload has already crossed the wire.
+    // Enforced here, before a byte is sent: the store's global maxSize is
+    // sized for video.
     if (isImage && upload.size > config.MAX_IMAGE_BYTES) {
       throw {
         status_code: 413,
         body: `Image too large (max ${Math.floor(config.MAX_IMAGE_BYTES / (1024 * 1024))}MB)`,
       };
     }
-    // Remux/transcode needs roughly 2x the file size transiently; keep a safety margin.
-    let publishDir = config.VIDEOS_DIR;
-    if (isAudio) publishDir = config.AUDIO_DIR;
-    if (isImage) publishDir = config.IMAGES_DIR;
+    // Remux/transcode needs ~2x the file size transiently. Checked against the
+    // pending dir, where conversion output actually lands.
+    let publishDir = config.PENDING_VIDEOS_DIR;
+    if (isAudio) publishDir = config.PENDING_AUDIO_DIR;
+    if (isImage) publishDir = config.PENDING_IMAGES_DIR;
     const free = await checkDiskSpace(publishDir);
     if (free !== null && free < upload.size * 2 + 5 * 1024 * 1024 * 1024) {
       throw { status_code: 507, body: 'Insufficient storage, try again later' };
     }
-    // Scoped to this one upload id — lets the browser PATCH chunks directly
-    // to this endpoint without ever holding the master UPLOAD_API_KEY.
-    // Only valid while the job is still 'uploading' (see onIncomingRequest).
+    // Scoped to this upload id and only while it is still 'uploading'.
     const uploadToken = crypto.randomBytes(24).toString('hex');
     await jobs.create(upload.id, {
       state: 'uploading',
@@ -139,9 +128,13 @@ const tusServer = new Server({
       filetype: meta.filetype,
       size: upload.size,
       upload_token: uploadToken,
-      // Verified username set by the trusted caller (only master-key holders
-      // can create uploads). DELETE enforces it via x-delete-owner.
+      // Verified by the trusted caller; DELETE enforces it via x-delete-owner.
       owner: meta.owner || null,
+      // Declared up front because the choice is permanent for public media:
+      // it goes to S5, whose CIDs cannot be revoked, so it can never become
+      // premium later (media.js refuses that flip). Declaring private here
+      // skips S5 for s3d instead.
+      visibility: meta.visibility === 'private' ? 'private' : 'public',
     });
     res.setHeader('X-Upload-Token', uploadToken);
     return res;

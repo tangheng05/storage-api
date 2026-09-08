@@ -5,23 +5,69 @@ const jobs = require('./jobs');
 const queue = require('./queue');
 const ffmpeg = require('./ffmpeg');
 const image = require('./image');
+const mirror = require('./mirror');
+const scan = require('./scan');
 const logger = require('./logger');
 
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
-// vp8/vp9/av1 in webm play and seek fine as-is; everything else goes to MP4.
-const WEBM_CODECS = ['vp8', 'vp9', 'av1'];
-// h264 already plays everywhere — cheap container remux, no re-encode.
-// hevc (iPhone default since iOS 11) has no browser decoder outside Safari,
-// so it needs a real transcode to h264 or it "succeeds" into an unplayable file.
 const TRANSCODE_CODECS = ['hevc'];
+const WEBM_CODECS = ['vp8', 'vp9', 'av1'];
+
+/*
+| Two stages on two lanes: `convert` writes the published form into a PENDING
+| dir nothing serves, then `finalize` scans it and only on a clean verdict moves
+| it into a served dir and pushes it to a backend.
+|
+| The gate is at publication, not at the storage push: exposure comes from
+| serving the bytes, local disk included.
+*/
 
 function tusFilePath(id) {
   return path.join(config.TUS_DIR, id);
 }
 
-// One retry for the ffmpeg publish step. A corrupt input fails identically both
-// times (still rejected), but a transient hiccup (I/O stall, OOM-killed ffmpeg,
-// timeout under load) shouldn't permanently fail a fully-uploaded video.
+async function exists(p) {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Two accommodations publishCleared depends on: idempotent, so a retry after a
+// partial publish finds the file already at dest rather than throwing; and a
+// copy fallback, because the pending and published dirs are separate env vars
+// and may sit on different mounts.
+async function move(from, to) {
+  try {
+    await fsp.rename(from, to);
+  } catch (err) {
+    if (err.code === 'EXDEV') {
+      await fsp.copyFile(from, to);
+      await fsp.rm(from, { force: true });
+      return;
+    }
+    if (err.code === 'ENOENT' && (await exists(to))) return;
+    throw err;
+  }
+}
+
+const PENDING_DIRS = {
+  video: config.PENDING_VIDEOS_DIR,
+  audio: config.PENDING_AUDIO_DIR,
+  image: config.PENDING_IMAGES_DIR,
+};
+
+function finalDirFor(mediaType, visibility) {
+  const priv = visibility === 'private';
+  if (mediaType === 'image') return priv ? config.PRIVATE_IMAGES_DIR : config.IMAGES_DIR;
+  if (mediaType === 'audio') return priv ? config.PRIVATE_AUDIO_DIR : config.AUDIO_DIR;
+  return priv ? config.PRIVATE_VIDEOS_DIR : config.VIDEOS_DIR;
+}
+
+// A corrupt input fails identically both times, but a transient hiccup should
+// not permanently fail a fully-uploaded video.
 async function withOneRetry(id, fn) {
   try {
     await fn();
@@ -32,7 +78,9 @@ async function withOneRetry(id, fn) {
   }
 }
 
-async function processVideo(id, src, probe) {
+// --- Stage 1: convert into the pending dir ---
+
+async function convertVideo(id, src, probe) {
   const videoStream = (probe.streams || []).find((s) => s.codec_type === 'video');
   const duration = parseFloat((probe.format && probe.format.duration) || '0');
   if (!videoStream) throw Object.assign(new Error('no_video_stream'), { code: 'no_video_stream' });
@@ -43,142 +91,307 @@ async function processVideo(id, src, probe) {
     throw Object.assign(new Error('invalid_duration'), { code: 'invalid_duration' });
   }
 
-  // Publish: webm passes through, h264 is remuxed (fast, lossless), and
-  // hevc is transcoded to h264 so it actually plays outside Safari.
-  const job = await jobs.get(id);
+  // webm passes through, h264 is remuxed losslessly, hevc is transcoded so it
+  // plays outside Safari.
   const codec = videoStream.codec_name;
   const isWebm = WEBM_CODECS.includes(codec) && (probe.format.format_name || '').includes('webm');
   const needsTranscode = TRANSCODE_CODECS.includes(codec);
   const ext = isWebm ? '.webm' : '.mp4';
-  const finalPath = path.join(config.VIDEOS_DIR, `${id}${ext}`);
-  const tmpPath = path.join(config.VIDEOS_DIR, `.${id}.tmp${ext}`);
+  const pendingPath = path.join(config.PENDING_VIDEOS_DIR, `${id}${ext}`);
+  const tmpPath = path.join(config.PENDING_VIDEOS_DIR, `.${id}.tmp${ext}`);
 
   if (isWebm) {
     await fsp.copyFile(src, tmpPath);
   } else if (needsTranscode) {
-    await jobs.update(id, { state: 'processing', processing_mode: 'transcode' });
+    await jobs.update(id, { processing_mode: 'transcode' });
     await withOneRetry(id, () => ffmpeg.transcodeToH264(src, tmpPath));
   } else {
     await withOneRetry(id, () => ffmpeg.remuxToMp4(src, tmpPath));
   }
-  await fsp.rename(tmpPath, finalPath);
+  await fsp.rename(tmpPath, pendingPath);
 
-  // Thumbnail from the published file.
-  const thumbPath = path.join(config.THUMBS_DIR, `${id}.jpg`);
+  // Doubles as the scanner's view of the video: a still frame is all an image
+  // classifier can rule on, and it is the frame the feed shows anyway.
+  const thumbFile = `${id}.jpg`;
+  const thumbPath = path.join(config.PENDING_THUMBS_DIR, thumbFile);
+  let hasThumb = true;
   try {
-    await ffmpeg.makeThumbnail(finalPath, thumbPath, Math.min(3, duration / 2));
+    await ffmpeg.makeThumbnail(pendingPath, thumbPath, Math.min(3, duration / 2));
   } catch (err) {
+    hasThumb = false;
     logger.warn({ id, err: err.message }, 'thumbnail generation failed');
   }
 
-  await jobs.update(id, {
-    state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/videos/${id}${ext}`,
-    thumbnail_url: `${config.PUBLIC_BASE_URL}/thumbnails/${id}.jpg`,
+  return {
+    pending_file: `${id}${ext}`,
+    pending_thumb: hasThumb ? thumbFile : null,
     duration_sec: Math.round(duration),
     width: videoStream.width,
     height: videoStream.height,
-    filename: job && job.filename,
-  });
-  logger.info({ id, duration }, 'video ready');
+  };
 }
 
-async function processAudio(id, src, probe) {
-  const audioStream = (probe.streams || []).find((s) => s.codec_type === 'audio');
+async function convertAudio(id, src, probe) {
   const duration = parseFloat((probe.format && probe.format.duration) || '0');
+  const audioStream = (probe.streams || []).find((s) => s.codec_type === 'audio');
   if (!audioStream) throw Object.assign(new Error('no_audio_stream'), { code: 'no_audio_stream' });
   if (!(duration > 0) || duration > config.MAX_AUDIO_DURATION_SEC) {
     throw Object.assign(new Error('invalid_duration'), { code: 'invalid_duration' });
   }
 
-  // Every upload is transcoded to AAC/M4A for consistent, universal playback.
-  const job = await jobs.get(id);
   const ext = '.m4a';
-  const finalPath = path.join(config.AUDIO_DIR, `${id}${ext}`);
-  const tmpPath = path.join(config.AUDIO_DIR, `.${id}.tmp${ext}`);
-
+  const pendingPath = path.join(config.PENDING_AUDIO_DIR, `${id}${ext}`);
+  const tmpPath = path.join(config.PENDING_AUDIO_DIR, `.${id}.tmp${ext}`);
   await withOneRetry(id, () => ffmpeg.transcodeToAac(src, tmpPath));
-  await fsp.rename(tmpPath, finalPath);
+  await fsp.rename(tmpPath, pendingPath);
 
-  await jobs.update(id, {
-    state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/audio/${id}${ext}`,
-    duration_sec: Math.round(duration),
-    filename: job && job.filename,
-  });
-  logger.info({ id, duration }, 'audio ready');
+  return { pending_file: `${id}${ext}`, pending_thumb: null, duration_sec: Math.round(duration) };
 }
 
-async function processImage(id, src, meta) {
-  // limitInputPixels already refuses bombs at decode time; checking the declared
-  // dimensions first turns that into a clean error code instead of a raw throw.
-  if (meta.width * meta.height > config.MAX_IMAGE_PIXELS) {
-    throw Object.assign(new Error('image_too_large'), { code: 'image_too_large' });
-  }
-
-  // Unconditional conversion to WebP, same rationale as audio->AAC: one output
-  // format everywhere beats carrying a dozen input formats through the stack.
-  const job = await jobs.get(id);
+async function convertImage(id, src, meta) {
   const ext = '.webp';
-  const finalPath = path.join(config.IMAGES_DIR, `${id}${ext}`);
-  const tmpPath = path.join(config.IMAGES_DIR, `.${id}.tmp${ext}`);
+  const pendingPath = path.join(config.PENDING_IMAGES_DIR, `${id}${ext}`);
+  const tmpPath = path.join(config.PENDING_IMAGES_DIR, `.${id}.tmp${ext}`);
+  await withOneRetry(id, () => image.toWebp(src, tmpPath, meta));
+  await fsp.rename(tmpPath, pendingPath);
 
-  try {
-    await withOneRetry(id, () => image.toWebp(src, tmpPath, meta));
-    await fsp.rename(tmpPath, finalPath);
-  } finally {
-    // No-op after a successful rename; cleans up a half-written file otherwise.
-    await fsp.rm(tmpPath, { force: true }).catch(() => {});
+  // EXIF rotation and the long-edge cap both change this from the upload.
+  const { width, height } = await image.publishedSize(pendingPath);
+  return { pending_file: `${id}${ext}`, pending_thumb: null, width, height, from: meta.format };
+}
+
+// --- Stage 2: scan, then publish ---
+
+function pendingPaths(job) {
+  return {
+    file: job.pending_file
+      ? path.join(PENDING_DIRS[job.media_type] || config.PENDING_VIDEOS_DIR, job.pending_file)
+      : null,
+    thumb: job.pending_thumb
+      ? path.join(config.PENDING_THUMBS_DIR, job.pending_thumb)
+      : null,
+  };
+}
+
+async function discardPending(job) {
+  const p = pendingPaths(job);
+  await Promise.all([
+    p.file ? fsp.rm(p.file, { force: true }) : null,
+    p.thumb ? fsp.rm(p.thumb, { force: true }) : null,
+  ].filter(Boolean));
+}
+
+// Video scans via its thumbnail: catches an opening frame, misses one that
+// turns bad later. Frame sampling is the upgrade path.
+async function runScan(id, job) {
+  const p = pendingPaths(job);
+  if (job.media_type === 'audio') {
+    return { verdict: scan.VERDICT.CLEAN, provider: 'unscannable', score: null, labels: [] };
   }
 
-  // Report what we actually published — the long-edge cap and the EXIF rotation
-  // both change this from the uploaded dimensions.
-  const { width, height } = await image.publishedSize(finalPath);
+  const isVideo = job.media_type === 'video';
+  const target = isVideo ? p.thumb : p.file;
+
+  // A missing target is a scan failure, never a pass. Thumbnail generation is
+  // allowed to fail, and treating that as clean let an uploader skip the gate
+  // entirely with a file whose frames do not decode.
+  if (!target || !(await exists(target))) {
+    throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
+  }
+
+  // The threshold follows the bytes being scanned, not the job. For video that
+  // is the thumbnail, which always publishes public — so it can land on S5 even
+  // when the video itself goes to s3d.
+  const visibility = isVideo ? 'public' : job.visibility || 'public';
+  const immutable = mirror.isImmutable({ mediaType: job.media_type, visibility });
+
+  return scan.scanFile({ filePath: target, mediaType: job.media_type, immutable });
+}
+
+// Local move first, so the file is where mirror.localPathFor expects it and a
+// backend failure leaves a correct local file rather than a half-published job.
+async function publishCleared(id, job) {
+  const visibility = job.visibility || 'public';
+  const kind = mirror.kindFor(job.media_type);
+  const p = pendingPaths(job);
+  const file = job.pending_file;
+  const finalDir = finalDirFor(job.media_type, visibility);
+  const finalPath = path.join(finalDir, file);
+
+  await fsp.mkdir(finalDir, { recursive: true });
+  await move(p.file, finalPath);
+
+  let thumbPath = null;
+  if (job.pending_thumb) {
+    // Always public, even for premium video: a locked card still shows its
+    // poster.
+    thumbPath = path.join(config.THUMBS_DIR, job.pending_thumb);
+    await fsp.mkdir(config.THUMBS_DIR, { recursive: true });
+    await move(p.thumb, thumbPath);
+  }
+
+  const published = await mirror.publish({
+    id, kind, mediaType: job.media_type, file, filePath: finalPath, visibility, slot: 'main',
+  });
+
+  let thumbnailUrl;
+  let thumbPatch = {};
+  if (thumbPath) {
+    const thumb = await mirror.publish({
+      id,
+      kind: 'thumbnails',
+      mediaType: job.media_type,
+      file: job.pending_thumb,
+      filePath: thumbPath,
+      visibility: 'public',
+      slot: 'thumb',
+    });
+    thumbPatch = thumb.patch;
+    thumbnailUrl = thumb.url || `${config.PUBLIC_BASE_URL}/thumbnails/${job.pending_thumb}`;
+  }
+
+  // Private media always goes through the signed /media/ path: the signature
+  // is the paywall.
+  const localUrl = visibility === 'private'
+    ? `${config.PUBLIC_BASE_URL}/media/${kind}/${file}`
+    : `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
 
   await jobs.update(id, {
     state: 'ready',
-    url: `${config.PUBLIC_BASE_URL}/images/${id}${ext}`,
-    width,
-    height,
-    filename: job && job.filename,
+    url: visibility === 'private' ? localUrl : published.url || localUrl,
+    ...(thumbnailUrl ? { thumbnail_url: thumbnailUrl } : {}),
+    pending_file: null,
+    pending_thumb: null,
+    ...published.patch,
+    ...thumbPatch,
   });
-  logger.info({ id, width, height, from: meta.format }, 'image ready');
+
+  logger.info(
+    { id, kind, visibility, backend: published.patch[mirror.SLOTS.main.backend] },
+    'media ready',
+  );
 }
 
-async function process(id) {
+// `approved` skips the scanner for a job a moderator cleared: re-scoring would
+// only re-flag it with the score that held it.
+async function finalize(id, { approved = false } = {}) {
+  const job = await jobs.get(id);
+  if (!job || !job.pending_file) return;
+
+  // Breaks the loop a partially-failed publish would otherwise cause: with no
+  // bytes there is nothing to scan, and re-running would synthesize a verdict
+  // for a file that is not there.
+  if (!(await exists(pendingPaths(job).file))) {
+    await jobs.update(id, {
+      state: 'failed',
+      error: 'pending_file_missing',
+      pending_file: null,
+      pending_thumb: null,
+    });
+    logger.error({ id }, 'pending file missing at the scan gate');
+    return;
+  }
+
+  // Persisted, not just passed: a restart between the moderator's decision and
+  // this task draining would otherwise re-scan and silently re-hold the file.
+  const cleared = approved || job.approved === true;
+  let scanError = null;
+  let result;
+  // Only the scan is guarded. A publish failure must not be recorded as a
+  // scanner outage, and must not re-enter this branch and publish a second time.
+  try {
+    result = cleared
+      ? { verdict: scan.VERDICT.CLEAN, provider: 'moderator', score: null, labels: [] }
+      : await runScan(id, job);
+  } catch (err) {
+    if (scan.enabled() && !config.SCAN_FAIL_OPEN) {
+      // An outage that delays uploads is cheaper than one bad file going live
+      // on a backend that cannot retract it.
+      await jobs.update(id, { state: 'scanning', scan_error: err.message });
+      logger.error({ id, err: err.message }, 'scan failed, holding upload (fail closed)');
+      return;
+    }
+    logger.error({ id, err: err.message }, 'scan failed, publishing anyway (fail open)');
+    result = { verdict: scan.VERDICT.CLEAN, provider: 'error', score: null, labels: [] };
+    scanError = err.message;
+  }
+
+  const patch = {
+    scan_verdict: result.verdict,
+    scan_provider: result.provider,
+    scan_score: result.score,
+    scan_labels: result.labels,
+    // Kept even when cleared: a later takedown can blocklist it.
+    scan_phash: result.phash || null,
+    scan_error: scanError,
+    scanned_at: new Date().toISOString(),
+  };
+
+  // The verdict is persisted before it is acted on, so a failure while acting
+  // cannot be mistaken for a failure to decide.
+  if (result.verdict === scan.VERDICT.REJECT) {
+    await jobs.update(id, {
+      ...patch, state: 'rejected', error: 'rejected_by_scan',
+    });
+    await discardPending(job);
+    await jobs.update(id, { pending_file: null, pending_thumb: null });
+    logger.warn({ id, labels: result.labels, matched: result.matched }, 'upload rejected by scan');
+    return;
+  }
+
+  if (result.verdict === scan.VERDICT.REVIEW) {
+    // Stays in pending: reachable by nobody, still there to approve.
+    await jobs.update(id, { ...patch, state: 'review' });
+    logger.info({ id, score: result.score, labels: result.labels }, 'upload held for review');
+    return;
+  }
+
+  await jobs.update(id, patch);
+  // Outside the scan guard on purpose. A throw here leaves the job in
+  // 'scanning' for the boot sweep to retry, and publishCleared is idempotent.
+  await publishCleared(id, job);
+}
+
+// --- Entry points ---
+
+async function convert(id) {
   const src = tusFilePath(id);
   try {
     const job = await jobs.get(id);
     await jobs.update(id, { state: 'processing' });
 
+    let meta;
     if (job && job.media_type === 'image') {
-      // sharp reads the header itself; ffprobe is not involved for images.
-      let meta;
+      let probe;
       try {
-        meta = await image.probe(src);
+        probe = await image.probe(src);
       } catch {
         throw Object.assign(new Error('not_an_image'), { code: 'not_an_image' });
       }
-      await processImage(id, src, meta);
+      meta = await convertImage(id, src, probe);
     } else {
-      // Validate it is a real, playable media file.
       let probe;
       try {
         probe = await ffmpeg.probe(src);
       } catch {
         throw Object.assign(new Error('not_a_media_file'), { code: 'not_a_media_file' });
       }
-
-      if (job && job.media_type === 'audio') {
-        await processAudio(id, src, probe);
-      } else {
-        await processVideo(id, src, probe);
-      }
+      meta = job && job.media_type === 'audio'
+        ? await convertAudio(id, src, probe)
+        : await convertVideo(id, src, probe);
     }
 
-    // Cleanup tus temp files.
+    // State first: a crash between deleting the source and recording the new
+    // state left a converted job looking unprocessed, and recovery then failed
+    // it for a source that was already gone.
+    await jobs.update(id, {
+      state: 'scanning',
+      filename: (job && job.filename) || null,
+      ...meta,
+    });
     await fsp.rm(src, { force: true });
     await fsp.rm(`${src}.json`, { force: true });
+    queue.push(() => finalize(id), queue.SCAN_LANE);
   } catch (err) {
     logger.error({ id, err: err.message }, 'processing failed');
     await fsp.rm(src, { force: true }).catch(() => {});
@@ -187,22 +400,42 @@ async function process(id) {
   }
 }
 
-// media_type picks the lane, so a 200ms image conversion never waits behind a
-// 30-minute HEVC transcode. Every caller already holds the job, so passing the
-// type in keeps this synchronous.
+// media_type picks the lane. Passed in rather than read, so this stays sync.
 function enqueue(id, mediaType) {
   const lane = mediaType === 'image' ? queue.IMAGE_LANE : queue.MEDIA_LANE;
-  queue.push(() => process(id), lane);
+  queue.push(() => convert(id), lane);
 }
 
-// Re-enqueue jobs interrupted by a crash/restart. Uploads still in
-// 'uploading' state are left alone — tus resumes them.
+// Re-runs the gate for anything still held by a scan error. Called on boot and
+// on the hourly timer, so a scanner that recovers mid-day needs no restart.
+function sweepHeld() {
+  jobs
+    .listByState(['scanning'])
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    .slice(0, config.SCAN_RECOVER_LIMIT)
+    .forEach((job) => queue.push(() => finalize(job.id), queue.SCAN_LANE));
+}
+
+// 'uploading' is left to tus. 'review' is left to the moderator: re-scanning
+// would re-flag it and overwrite their queue entry.
 function recoverOnBoot() {
-  const stuck = jobs.listByState(['queued', 'processing']);
-  stuck.forEach((job) => {
+  // Oldest first: readdir order is unspecified, and with a recovery cap an
+  // arbitrary subset would otherwise be retried forever while the rest starved.
+  const oldestFirst = (a, b) => String(a.created_at).localeCompare(String(b.created_at));
+
+  jobs.listByState(['queued', 'processing']).sort(oldestFirst).forEach((job) => {
     logger.info({ id: job.id, media_type: job.media_type }, 'recovering interrupted job');
     enqueue(job.id, job.media_type);
   });
+
+  jobs
+    .listByState(['scanning'])
+    .sort(oldestFirst)
+    .slice(0, config.SCAN_RECOVER_LIMIT)
+    .forEach((job) => {
+      logger.info({ id: job.id }, 'recovering upload held at the scan gate');
+      queue.push(() => finalize(job.id), queue.SCAN_LANE);
+    });
 }
 
-module.exports = { enqueue, recoverOnBoot };
+module.exports = { enqueue, finalize, discardPending, recoverOnBoot, sweepHeld };

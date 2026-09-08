@@ -5,12 +5,18 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node src/index.js"
+    "dev": "node src/index.js",
+    "test:s5": "node test/s5-scan-test.js",
+    "test:s3d": "node test/s3d-test.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.967.0",
+    "@aws-sdk/lib-storage": "^3.967.0",
+    "@noble/hashes": "^1.8.0",
+    "@smithy/node-http-handler": "^4.0.0",
     "@tus/file-store": "^1.5.1",
     "@tus/server": "^1.10.1",
     "cors": "^2.8.5",

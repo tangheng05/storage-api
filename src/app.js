@@ -10,6 +10,8 @@ const videosRouter = require('./routes/videos');
 const audioRouter = require('./routes/audio');
 const imagesRouter = require('./routes/images');
 const mediaRouter = require('./routes/media');
+const cdnRouter = require('./routes/cdn');
+const moderationRouter = require('./routes/moderation');
 
 const app = express();
 
@@ -94,6 +96,19 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // Signed delivery + visibility changes for paywalled media. Mounted before the
 // static fallbacks so nothing under /media is ever served unauthenticated.
 app.use('/media', express.json({ limit: '8kb' }), mediaRouter);
+// NPM forwards /moderation straight here with nothing in front of it, so the
+// key check is the only barrier — rate limit it rather than leave an unbounded
+// 401-vs-200 oracle.
+const moderationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+app.use('/moderation', moderationLimiter, express.json({ limit: '8kb' }), moderationRouter);
+// ULID -> CID resolver for public media on S5.
+app.use('/cdn', cdnRouter);
 
 app.use('/videos', videosRouter);
 app.use('/audio', audioRouter);

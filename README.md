@@ -19,11 +19,30 @@ a grey-cloud hostname — no code change needed.)
 client (tus-js-client)                 this service                       nginx
   POST /files  ──────────────►  auth + validate + create job
   PATCH chunks (resumable) ───►  tus FileStore (data/tus)
-  upload complete ────────────►  queue: ffprobe → remux MP4
-                                 faststart → thumbnail → publish
+  upload complete ────────────►  convert: ffprobe → remux/transcode
+                                 → thumbnail → PENDING dir (unserved)
+                              ►  finalize: scan → publish → storage backend
   GET /videos/:id/status ─────►  { state, url, thumbnail_url }
   <video src=.../videos/x.mp4>  ◄──────────────── static + Range ◄────  disk
 ```
+
+Nothing is reachable until it clears the scan gate: conversion writes to a
+`PENDING_*_DIR` that nothing serves, and only a clean verdict moves the file into
+a served directory. The gate is at publication rather than at the storage push,
+because what creates exposure is serving the bytes — local disk included.
+
+Where a published file lands is decided by visibility, not preference:
+
+- **public → S5** (content addressed). The CID is the file's BLAKE3 hash. URLs
+  keep our own hostname with the ULID in the path and are resolved to a CID by
+  `/cdn`, so no CID is ever frozen into a serey-api post row.
+- **premium → local disk**, delivered through `/media/...` with an HMAC
+  signature. An s3d backend exists for a second copy but is off by default.
+
+A CID *is* the permission — anyone who has held one keeps access forever — so a
+public file can never become premium: `POST /media/:kind/:file/visibility`
+returns 409 for anything already on S5. Declare `visibility: 'private'` in
+`Upload-Metadata` at create time instead; that upload skips S5 entirely.
 
 The final `url` / `thumbnail_url` is sent to serey-api in the post body — the
 same pattern as `image_url` today. serey-api needs no changes.
@@ -36,17 +55,31 @@ One shared key. Every upload/status/delete request must send it:
 x-upload-key: <UPLOAD_API_KEY>
 ```
 
+`/moderation/*` takes its own `MODERATION_API_KEY` instead — the upload key is
+held by serey-api and CI, which should not be enough to approve held content or
+write the blocklist. Unset leaves those routes disabled (503).
+
 ## API
 
 | Method | Path | Description |
 |---|---|---|
 | POST/PATCH/HEAD | `/files[/:id]` | tus 1.0.0 resumable upload endpoints (video or audio, by mimetype) |
-| GET | `/videos/:id/status` | `{ state: uploading\|queued\|processing\|ready\|failed, url?, thumbnail_url?, error? }` |
+| GET | `/videos/:id/status` | `{ state, url?, thumbnail_url?, error? }` |
 | DELETE | `/videos/:id` | Remove a video + thumbnail |
-| GET | `/audio/:id/status` | `{ state: uploading\|queued\|processing\|ready\|failed, url?, error? }` |
+| GET | `/audio/:id/status` | `{ state, url?, error? }` |
 | DELETE | `/audio/:id` | Remove an audio file |
-| GET | `/images/:id/status` | `{ state: uploading\|queued\|processing\|ready\|failed, url?, width?, height?, error? }` |
+| GET | `/images/:id/status` | `{ state, url?, width?, height?, error? }` |
+
+Job states: `uploading → queued → processing → scanning → ready | review |
+rejected | failed`. `review` means a human has to clear it; `rejected` means the
+scanner or a moderator refused it and the bytes were discarded.
 | DELETE | `/images/:id` | Remove an image |
+| GET | `/moderation/queue` | Uploads the scanner held for a human (operator key) |
+| POST | `/moderation/:id/approve` | Publish a held upload without re-scoring it |
+| POST | `/moderation/:id/reject` | Discard it and blocklist its perceptual hash |
+| POST | `/moderation/blocklist` | Add a hash directly, by `phash` or job id |
+| GET | `/moderation/stats` | Verdict counts and active thresholds, for tuning |
+| GET | `/cdn/:kind/:file` | Resolves a public ULID to its CID (302, no auth) |
 | GET | `/health` | Liveness check (no auth) |
 | GET | `/videos/:id.mp4`, `/thumbnails/:id.jpg`, `/audio/:id.m4a`, `/images/:id.webp` | Public files (nginx in prod) |
 
@@ -58,6 +91,14 @@ Limits: 2GB per file (**20MB for images**), 30 new uploads per IP per hour.
   are upright) and the rest of the EXIF — including GPS — is dropped. Animated
   GIFs stay animated. BMP and SVG are rejected: BMP isn't in sharp's bundled
   libvips, and rasterising untrusted SVG is an attack surface.
+
+Scanning (off unless `SCAN_ENABLED`): a perceptual-hash blocklist of content
+already taken down, then optionally a classifier endpoint. Images are scanned
+directly, video via its generated thumbnail, and audio not at all. Thresholds
+are stricter when the destination is S5, because that publish cannot be undone.
+A broken scanner fails closed — the upload waits and is retried hourly. **This
+is not a CSAM solution**: that needs hash matching (Cloudflare's free tool,
+PhotoDNA) and carries its own reporting obligations.
 
 ## Run locally
 
