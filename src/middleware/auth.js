@@ -46,4 +46,25 @@ function requireUploadKey(req, res, next) {
   return next();
 }
 
-module.exports = { isAuthorized, matchesUploadToken, requireUploadKey };
+/*
+| Operator routes take their own key, not the upload key.
+|
+| The upload key is held by serey-api, CI and every copy of .env — it is not a
+| credential that should let its holder approve held content or write the
+| blocklist. Unset means the feature is off (503), because NPM forwards
+| /moderation straight to the app and there is no network-level restriction in
+| front of it.
+*/
+function requireModerationKey(req, res, next) {
+  if (!config.MODERATION_API_KEY) {
+    return res.status(503).json({ error: 'Moderation is not configured' });
+  }
+  if (!safeEqual(extractProvidedKey(req), config.MODERATION_API_KEY)) {
+    return res.status(401).json({ error: 'Invalid or missing moderation key' });
+  }
+  return next();
+}
+
+module.exports = {
+  isAuthorized, matchesUploadToken, requireUploadKey, requireModerationKey, safeEqual,
+};

@@ -24,7 +24,6 @@ const SLOTS = {
   main: {
     cid: 's5_cid',
     key: 'sia_key',
-    bytes: 'mirror_bytes',
     backend: 'storage_backend',
     state: 'mirror_state',
     error: 'mirror_error',
@@ -32,8 +31,6 @@ const SLOTS = {
   thumb: {
     cid: 's5_thumb_cid',
     key: 'sia_thumb_key',
-    bytes: 'thumb_bytes',
-    backend: 'thumb_backend',
     state: 'thumb_state',
     error: 'thumb_error',
   },
@@ -89,7 +86,6 @@ async function publish({
         patch: {
           [fields.backend]: 's5',
           [fields.cid]: cid,
-          [fields.bytes]: bytes,
           [fields.state]: 'published',
           [fields.error]: null,
         },
@@ -104,7 +100,6 @@ async function publish({
       patch: {
         [fields.backend]: 's3d',
         [fields.key]: key,
-        [fields.bytes]: bytes,
         [fields.state]: 'published',
         [fields.error]: null,
       },
@@ -125,13 +120,16 @@ async function publish({
 }
 
 // Durability only: the URL already in serey-api is left alone.
-async function retry(id) {
+async function retry(id, { force = false } = {}) {
   const job = await jobs.get(id);
   if (!job) return;
 
   for (const slot of ['main', 'thumb']) {
     const fields = SLOTS[slot];
-    if (job[fields.state] !== 'failed') continue;
+    // force is for the verify script: a slot it found missing or wrong is
+    // 'published', which is exactly the state this would otherwise skip.
+    if (!force && job[fields.state] !== 'failed') continue;
+    if (force && !job[fields.state]) continue;
 
     const file = slot === 'thumb' ? `${id}.jpg` : fileFromJob(job);
     if (!file) continue;
@@ -217,13 +215,13 @@ function recoverOnBoot() {
   const pending = jobs
     .listByState(['ready'])
     .filter((job) => job.mirror_state === 'failed' || job.thumb_state === 'failed')
-    .slice(0, config.SIA_RECOVER_LIMIT);
+    .slice(0, config.PUBLISH_RECOVER_LIMIT);
 
   if (!pending.length) return;
 
   logger.info({ count: pending.length }, 'requeueing unfinished publishes');
   pending.forEach((job) => {
-    queue.push(() => retry(job.id), queue.SIA_LANE);
+    queue.push(() => retry(job.id), queue.PUBLISH_LANE);
   });
 }
 
@@ -243,29 +241,39 @@ async function purge(job) {
     const cid = job[fields.cid];
     const key = job[fields.key];
 
+    // Both identifiers are acted on, not just the first: a job re-routed
+    // between backends keeps the old one, and skipping it left that copy live
+    // after a takedown.
+    const done = [];
+
     if (cid) {
       // eslint-disable-next-line no-await-in-loop
-      report[slot] = await s5.unpin(cid);
-      if (report[slot] !== 'unpinned') {
+      const result = await s5.unpin(cid);
+      done.push(`s5:${result}`);
+      if (result !== 'unpinned') {
         logger.error(
-          { id: job.id, cid, slot, result: report[slot] },
+          { id: job.id, cid, slot, result },
           'S5 CONTENT NOT RETRACTABLE, it remains fetchable by CID',
         );
       }
-    } else if (key && sia.enabled()) {
+    }
+
+    if (key && sia.enabled()) {
       try {
         // eslint-disable-next-line no-await-in-loop
         await sia.deleteObject(key);
-        report[slot] = 'deleted';
+        done.push('s3d:deleted');
         logger.info({ id: job.id, key, slot }, 'deleted from s3d');
       } catch (err) {
-        report[slot] = 'failed';
+        done.push('s3d:failed');
         logger.error(
           { id: job.id, key, slot, err: err.message },
           'S3D OBJECT NOT DELETED, remove it manually',
         );
       }
     }
+
+    if (done.length) report[slot] = done.join(', ');
   }
 
   return report;
@@ -278,7 +286,6 @@ module.exports = {
   recoverOnBoot,
   backendFor,
   isImmutable,
-  s3dServing,
   publicUrl,
   localPathFor,
   fileFromJob,

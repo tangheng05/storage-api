@@ -4,7 +4,8 @@ const path = require('path');
 const config = require('../config');
 
 // Job state store: one JSON file per video id under JOBS_DIR.
-// States: uploading -> queued -> processing -> ready | failed
+// States: uploading -> queued -> processing -> scanning -> ready | review |
+// rejected | failed
 
 const ULID_REGEX = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 

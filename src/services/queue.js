@@ -11,7 +11,7 @@ const MEDIA_LANE = 'media'; // ffmpeg: video remux/transcode, audio transcode
 const IMAGE_LANE = 'image'; // sharp: fast, must not wait behind the above
 // Retrying storage pushes that failed earlier: background durability work that
 // must never sit in front of a live upload.
-const SIA_LANE = 'sia';
+const PUBLISH_LANE = 'sia';
 // The scan gate and the storage push after it. Network I/O, kept off the
 // ffmpeg and sharp lanes so a slow classifier cannot stall conversions.
 const SCAN_LANE = 'scan';
@@ -45,9 +45,8 @@ function push(task, name = MEDIA_LANE) {
 
 module.exports = {
   push,
-  size: (name = MEDIA_LANE) => laneFor(name).tasks.length,
   MEDIA_LANE,
   IMAGE_LANE,
-  SIA_LANE,
+  PUBLISH_LANE,
   SCAN_LANE,
 };

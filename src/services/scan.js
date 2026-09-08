@@ -162,16 +162,11 @@ function decide(score, { immutable }) {
 const RUNNERS = { phash: runPhash, http: runHttp };
 
 // Throws only when a provider is broken; what that means is policy
-// (SCAN_FAIL_OPEN). Audio reports 'unscannable' rather than a clean verdict
-// from a check that never ran.
+// (SCAN_FAIL_OPEN), decided by the caller.
 async function scanFile({ filePath, mediaType, immutable = false }) {
   if (!enabled()) {
     return { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'disabled' };
   }
-  if (mediaType === 'audio') {
-    return { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'unscannable' };
-  }
-
   const results = [];
   for (const name of config.SCAN_PROVIDERS) {
     const runner = RUNNERS[name];
@@ -184,10 +179,14 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     if (verdict === VERDICT.REJECT) break;
   }
 
+  // Highest verdict wins; among equals the highest score, so a clean pass still
+  // records what it actually scored.
+  const rank = { clean: 0, review: 1, reject: 2 };
   const worst = results.reduce((acc, r) => {
-    const rank = { clean: 0, review: 1, reject: 2 };
-    return rank[r.verdict] > rank[acc.verdict] ? r : acc;
-  }, { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'none' });
+    if (!acc) return r;
+    if (rank[r.verdict] !== rank[acc.verdict]) return rank[r.verdict] > rank[acc.verdict] ? r : acc;
+    return (r.score ?? -1) > (acc.score ?? -1) ? r : acc;
+  }, null) || { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'none' };
 
   return {
     verdict: worst.verdict,

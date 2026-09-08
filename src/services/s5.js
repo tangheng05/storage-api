@@ -1,4 +1,6 @@
 const fs = require('fs');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const fsp = require('fs/promises');
 const path = require('path');
 const { blake3 } = require('@noble/hashes/blake3');
@@ -73,7 +75,7 @@ async function request(url, init, timeoutMs = config.S5_TIMEOUT_MS) {
   }
 }
 
-// The 10 MiB ceiling covers every published image and no video at all.
+// Under S5_SMALL_MAX_BYTES, which covers every published image and no video.
 async function uploadSmall(filePath) {
   const buf = await fsp.readFile(filePath);
   const form = new FormData();
@@ -113,7 +115,12 @@ async function uploadTus(filePath, { size, hash }) {
   }
   const location = create.headers.get('location');
   if (!location) throw new Error('s5 tus create returned no Location');
-  const target = new URL(location, config.S5_NODE_URL).toString();
+  // Pinned to the node's origin: an absolute Location would otherwise send the
+  // bearer token and the file bytes to any host the node names.
+  const target = new URL(location, config.S5_NODE_URL);
+  if (target.origin !== new URL(config.S5_NODE_URL).origin) {
+    throw new Error(`s5 tus Location left the node origin: ${target.origin}`);
+  }
 
   let offset = 0;
   const fh = await fsp.open(filePath, 'r');
@@ -139,7 +146,13 @@ async function uploadTus(filePath, { size, hash }) {
       const next = parseInt(res.headers.get('upload-offset'), 10);
       // Trust the server's offset: if it accepted a short write, our own
       // count would corrupt the blob.
-      offset = Number.isFinite(next) ? next : offset + bytesRead;
+      const advanced = Number.isFinite(next) ? next : offset + bytesRead;
+      // Without this a node echoing a stale offset loops forever, and putFile
+      // runs on a concurrency-1 lane, so it would block every other upload.
+      if (advanced <= offset) {
+        throw new Error(`s5 tus made no progress at offset ${offset}`);
+      }
+      offset = advanced;
     }
   } finally {
     await fh.close();
@@ -161,6 +174,13 @@ async function putFile({ filePath }) {
     await uploadTus(filePath, { size, hash });
   }
 
+  // The CID is computed locally and the upload responses are undocumented, so
+  // without this a wrong tus hash encoding would look like success and freeze a
+  // dead URL into a serey-api post row permanently.
+  if (!(await stat(cid))) {
+    throw new Error(`s5 upload reported success but ${cid} is not retrievable`);
+  }
+
   logger.info({ cid, bytes: size }, 's5 blob uploaded');
   return { cid, bytes: size };
 }
@@ -171,17 +191,19 @@ function downloadUrl(cid) {
 }
 
 // Ranged GET rather than HEAD: the docs do not commit to HEAD being supported.
-async function exists(cid) {
+// The body is cancelled rather than read — a node that ignores Range would
+// otherwise make the verify script download every object in full.
+async function stat(cid) {
   if (!enabled()) throw new Error('s5_not_configured');
   const res = await request(downloadUrl(cid), {
     method: 'GET',
     headers: authHeaders({ range: 'bytes=0-0' }),
   }, 30000);
+  if (res.body) await res.body.cancel().catch(() => {});
   if (res.status === 404) return null;
   if (!res.ok && res.status !== 206) {
-    throw new Error(`s5 head failed: ${res.status}`);
+    throw new Error(`s5 stat failed: ${res.status}`);
   }
-  await res.arrayBuffer().catch(() => {});
   const total = (res.headers.get('content-range') || '').split('/')[1];
   return { bytes: total ? parseInt(total, 10) : null };
 }
@@ -194,7 +216,8 @@ async function getToFile({ cid, filePath }) {
 
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.restore`);
-  await fsp.writeFile(tmpPath, Buffer.from(await res.arrayBuffer()));
+  // Streamed: a 2GB restore must not be materialised in memory first.
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tmpPath));
 
   const check = await hashFile(tmpPath);
   if (check.cid !== cid) {
@@ -233,7 +256,7 @@ module.exports = {
   buildCid,
   hashFile,
   putFile,
-  exists,
+  stat,
   getToFile,
   unpin,
   downloadUrl,

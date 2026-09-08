@@ -48,6 +48,10 @@ mkdir -p /var/www/serey-videos/{videos,thumbnails,audio,images}   # on the Hetzn
 # Paywalled media. nginx must NOT serve these publicly — they are reachable
 # only through /media/... with a valid signature (see section on nginx below).
 mkdir -p /var/www/serey-videos/private/{videos,audio,images}
+# Conversion output waits here for the scan gate. Must be on the same mount as
+# the published dirs, or the pending -> published move becomes a cross-device
+# copy. nginx must not serve it.
+mkdir -p /var/www/serey-videos/pending/{videos,audio,images,thumbnails}
 chown -R serey-storage:serey-storage /var/lib/serey-storage /var/www/serey-videos
 ```
 
@@ -142,73 +146,24 @@ Create a **Proxy Host**:
 - **Advanced tab** — paste this custom config (critical for large uploads and
   video seeking):
 
-```nginx
-# ---- tus uploads: don't buffer, don't cap body size ----
-location /files {
-    proxy_pass http://127.0.0.1:8080;
-    client_max_body_size 0;
-    proxy_request_buffering off;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_read_timeout 300s;
-    proxy_send_timeout 300s;
-}
+The intended `location` blocks live in
+[`nginx-storage.serey.io.conf`](nginx-storage.serey.io.conf) — that file is the
+single source, so paste from it rather than from a copy here. It previously
+existed twice and the copies drifted.
 
-# ---- published videos + thumbnails straight from disk ----
-# nginx serves Range requests (seeking) natively for static files.
-location /videos/ {
-    root /var/www/serey-videos;
-    add_header Cache-Control "public, max-age=31536000, immutable";
-    add_header Access-Control-Allow-Origin "*";
-}
-location /thumbnails/ {
-    root /var/www/serey-videos;
-    add_header Cache-Control "public, max-age=31536000, immutable";
-    add_header Access-Control-Allow-Origin "*";
-}
+Two things in it that matter whenever static serving does move to nginx:
 
-# ---- API routes (status/delete) back to node ----
-# Regex beats the /videos/ prefix above; API paths have no file extension.
-location ~ ^/videos/[0-9A-HJKMNP-TV-Z]{26}(/status)?$ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
+- `location /pending/ { deny all; }` — the scan gate stages conversion output
+  there. Serving it would defeat the gate entirely.
+- `location /cdn/` and `location /moderation/` must be proxied to the app, not
+  served from disk. An S5-published file has no local copy.
 
-# ---- paywalled media: signed delivery ----
-# The app checks the signature, then hands off with X-Accel-Redirect so nginx
-# still streams from disk. proxy_buffering must stay off or video accumulates
-# in a buffer instead of streaming.
-location /media/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_buffering off;
-    proxy_read_timeout 300s;
-}
-
-# Reachable ONLY through X-Accel-Redirect from the app; nginx refuses a direct
-# request. This is what keeps premium files off the public web.
-location /internal-media/ {
-    internal;
-    alias /var/www/serey-videos/private/;
-    add_header Cache-Control "private, no-store" always;
-}
-
-# Belt and braces: never serve the private tree directly, whatever else changes.
-location /private/ {
-    deny all;
-    return 404;
-}
-```
+The `cdn.serey.io` server block at the bottom of that file is **commented out**:
+`listen ... ssl` with no `ssl_certificate` is a hard error and would stop nginx
+loading the whole file. Uncomment it only after certbot has issued the cert. With
+NPM you do not need it at all — add `cdn.serey.io` as a second Proxy Host
+pointing at the same app, or leave `MEDIA_CDN_BASE_URL` empty and public media
+resolves through `storage.serey.io/cdn/`.
 
 If NPM runs in Docker, mount the video dirs into the NPM container
 (`-v /var/www/serey-videos:/var/www/serey-videos:ro`) so the static
@@ -226,6 +181,42 @@ request must 403/404 even though the file exists:
 curl -sI https://storage.serey.io/private/videos/<ulid>.mp4   # expect 404
 curl -sI https://storage.serey.io/media/videos/<ulid>.mp4     # expect 403 (unsigned)
 ```
+
+## 7b. New env for the scan gate and S5
+
+```bash
+# Operator key for /moderation. Separate from UPLOAD_API_KEY on purpose: that
+# one is held by serey-api and CI. Unset leaves the routes disabled (503).
+MODERATION_API_KEY=$(openssl rand -hex 32)
+
+# The gate itself. phash alone only catches re-uploads of content already taken
+# down; a classifier endpoint is what scores new content.
+SCAN_ENABLED=true
+SCAN_PROVIDERS=phash
+SCAN_BLOCKLIST_PATH=/var/www/serey-videos/blocklist.txt
+
+# Public media on S5. Leave S5_ENABLED=false until a node is reachable and one
+# real upload has round-tripped — putFile verifies the CID is retrievable before
+# reporting success, so a misconfigured node fails loudly rather than writing a
+# dead URL into a post row.
+S5_ENABLED=false
+S5_NODE_URL=http://127.0.0.1:5050
+S5_AUTH_TOKEN=
+```
+
+The S5 node runs as a container and expects a reverse proxy in front:
+
+```bash
+docker run -d --name s5-node   -p 127.0.0.1:5050:5050   -v /var/lib/s5/config:/config -v /var/lib/s5/db:/db   --restart unless-stopped ghcr.io/s5-dev/node:latest
+```
+
+Put `/db` on SSD. `config.toml` is generated on first boot; set `[http.api]
+domain` to the hostname you actually serve it on, then mint a token and put it
+in `S5_AUTH_TOKEN`.
+
+Keep `USE_X_ACCEL=false` unless you have pasted the `/internal-media/` location
+into NPM's Advanced box — nothing else honours `X-Accel-Redirect`, and premium
+delivery would return empty responses.
 
 ## 8. Safety-net cleanup cron
 

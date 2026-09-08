@@ -2,8 +2,8 @@
 /*
 | Push already-published media onto a storage backend.
 |
-|   node scripts/sia-backfill.js --dry-run
-|   node scripts/sia-backfill.js --type video --limit 50
+|   node scripts/storage-backfill.js --dry-run
+|   node scripts/storage-backfill.js --type video --limit 50
 |
 | The boot sweep only retries publishes that *failed*, so anything predating a
 | backend stays 'skipped' forever — the day video is added, every existing video
@@ -13,6 +13,8 @@
 | file it points at is still correct.
 */
 const fsp = require('fs/promises');
+const path = require('path');
+const config = require('../src/config');
 const jobs = require('../src/services/jobs');
 const mirror = require('../src/services/mirror');
 const sia = require('../src/services/sia');
@@ -93,6 +95,27 @@ async function main() {
       // eslint-disable-next-line no-await-in-loop
       await jobs.update(job.id, patch);
       const state = patch[mirror.SLOTS.main.state];
+
+      // A video's thumbnail is a separate object on a separate slot. Skipping it
+      // meant a restore brought back every video and no posters.
+      const thumbFile = `${job.id}.jpg`;
+      const thumbPath = path.join(config.THUMBS_DIR, thumbFile);
+      // eslint-disable-next-line no-await-in-loop
+      if (job.media_type === 'video' && (await exists(thumbPath))) {
+        // eslint-disable-next-line no-await-in-loop
+        const thumb = await mirror.publish({
+          id: job.id,
+          kind: 'thumbnails',
+          mediaType: 'video',
+          file: thumbFile,
+          filePath: thumbPath,
+          visibility: 'public',
+          slot: 'thumb',
+        });
+        // eslint-disable-next-line no-await-in-loop
+        await jobs.update(job.id, thumb.patch);
+      }
+
       console.log(`  ${job.id}  ${state} -> ${backend}`);
       if (state === 'published') done += 1;
       else skipped += 1;

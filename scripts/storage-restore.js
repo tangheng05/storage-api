@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /*
-| Pull files back down from Sia to local disk. This is the disaster path, and it
+| Pull files back down from a backend to local disk. This is the disaster path, and it
 | is the only thing that proves the backup is real. Exercise it at least once
 | before trusting any of this.
 |
-|   node scripts/sia-restore.js <ULID>        # one file
-|   node scripts/sia-restore.js --all-missing # everything absent from disk
-|   node scripts/sia-restore.js --all-missing --dry-run
+|   node scripts/storage-restore.js <ULID>        # one file
+|   node scripts/storage-restore.js --all-missing # everything absent from disk
+|   node scripts/storage-restore.js --all-missing --dry-run
 */
 const fsp = require('fs/promises');
+const path = require('path');
+const config = require('../src/config');
 const jobs = require('../src/services/jobs');
 const sia = require('../src/services/sia');
 const s5 = require('../src/services/s5');
@@ -54,6 +56,19 @@ async function restoreOne(job) {
     ? await s5.getToFile({ cid: job.s5_cid, filePath })
     : await sia.getToFile({ key: job.sia_key, filePath });
   console.log(`  ${job.id}  restored ${bytes} bytes -> ${filePath}`);
+
+  // The thumbnail is a separate object; without this a restored video comes
+  // back posterless and unrecoverable.
+  if (job.s5_thumb_cid || job.sia_thumb_key) {
+    const thumbPath = path.join(config.THUMBS_DIR, `${job.id}.jpg`);
+    try {
+      if (job.s5_thumb_cid) await s5.getToFile({ cid: job.s5_thumb_cid, filePath: thumbPath });
+      else await sia.getToFile({ key: job.sia_thumb_key, filePath: thumbPath });
+      console.log(`  ${job.id}  restored thumbnail -> ${thumbPath}`);
+    } catch (err) {
+      console.log(`  ${job.id}  thumbnail restore FAILED: ${err.message}`);
+    }
+  }
   return true;
 }
 

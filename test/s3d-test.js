@@ -136,7 +136,7 @@ async function main() {
   });
   check('publish returns the Sia URL', pub.url === `https://cdn.test.local/images/${ID}.webp`);
   check('key is namespaced under public/', pub.patch.sia_key === `public/images/${ID}.webp`);
-  check('state is mirrored', pub.patch.mirror_state === 'published');
+  check('state is published', pub.patch.mirror_state === 'published');
 
   const head = await sia.headObject(pub.patch.sia_key);
   check('remote size matches local', head.bytes === smallBytes.length);

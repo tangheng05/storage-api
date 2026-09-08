@@ -284,6 +284,105 @@ async function main() {
   ok('an approved upload records the human decision', approved.scan_provider === 'moderator');
   ok('an approved upload leaves pending', !fs.existsSync(held));
 
+  // --- paywall boundaries, over HTTP ---
+  const app = require('../src/app');
+  const srv = await new Promise((r) => {
+    const l = app.listen(0, () => r(l));
+  });
+  const port = srv.address().port;
+
+  const call = (method, p, body) => new Promise((resolve) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      port,
+      path: p,
+      method,
+      headers: {
+        'x-upload-key': 's5-test',
+        ...(payload
+          ? { 'content-type': 'application/json', 'content-length': payload.length }
+          : {}),
+      },
+    }, (res) => {
+      let text = '';
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => resolve({ status: res.statusCode, location: res.headers.location, text }));
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+
+  const pub = await call('GET', `/cdn/images/${ULID_A}.webp`);
+  ok('cdn resolves a public job to its CID', pub.status === 302 && /f5b821e/.test(pub.location));
+
+  // /cdn is unauthenticated, so this check is the only thing between a premium
+  // CID and an anonymous caller.
+  const ULID_P = '01J0000000000000000000000D';
+  await jobs.create(ULID_P, {
+    state: 'ready', media_type: 'image', visibility: 'private', s5_cid: 'fdeadbeef',
+  });
+  ok('cdn refuses a premium job', (await call('GET', `/cdn/images/${ULID_P}.webp`)).status === 404);
+
+  // A premium video's thumbnail is public by design, so it must still resolve.
+  const ULID_T = '01J0000000000000000000000E';
+  await jobs.create(ULID_T, {
+    state: 'ready', media_type: 'video', visibility: 'private', s5_thumb_cid: 'fcafebabe',
+  });
+  ok('cdn still resolves a premium video thumbnail',
+    (await call('GET', `/cdn/thumbnails/${ULID_T}.jpg`)).status === 302);
+
+  const ULID_Q = '01J0000000000000000000000F';
+  await jobs.create(ULID_Q, { state: 'scanning', media_type: 'image', s5_cid: 'fbadbad' });
+  ok('cdn refuses a job that is not ready',
+    (await call('GET', `/cdn/images/${ULID_Q}.webp`)).status === 404);
+
+  // The flip window: marking premium while the file is still at the gate used to
+  // 404 without recording anything, so finalize published it public and
+  // permanent.
+  const ULID_W = '01J0000000000000000000000G';
+  await makeImage(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_W}.webp`), 71);
+  await jobs.create(ULID_W, {
+    state: 'scanning', media_type: 'image', visibility: 'public', pending_file: `${ULID_W}.webp`,
+  });
+  const flip = await call('POST', `/media/images/${ULID_W}.webp/visibility`, { visibility: 'private' });
+  ok('flipping to premium pre-publication is accepted, not 404', flip.status === 200);
+  ok('the pending job records the new visibility',
+    (await jobs.get(ULID_W)).visibility === 'private');
+
+  const beforeFlip = blobs.get('last');
+  await processor.finalize(ULID_W);
+  const flipped = await jobs.get(ULID_W);
+  ok('a job flipped at the gate publishes as premium', flipped.visibility === 'private');
+  ok('it lands in the private dir',
+    fs.existsSync(path.join(root, dirs.PRIVATE_IMAGES_DIR, `${ULID_W}.webp`)));
+  ok('it is not in the public dir',
+    !fs.existsSync(path.join(root, dirs.IMAGES_DIR, `${ULID_W}.webp`)));
+  ok('it never reached S5', blobs.get('last') === beforeFlip);
+  ok('it is served through the signed /media path', /\/media\/images\//.test(flipped.url));
+
+  // A broken scanner must hold, not publish.
+  const ULID_H = '01J0000000000000000000000H';
+  await makeImage(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_H}.webp`), 83);
+  await jobs.create(ULID_H, {
+    state: 'scanning', media_type: 'image', visibility: 'public', pending_file: `${ULID_H}.webp`,
+  });
+  const cfg = require('../src/config');
+  const keepProviders = cfg.SCAN_PROVIDERS;
+  cfg.SCAN_PROVIDERS = ['http'];
+  cfg.SCAN_HTTP_URL = 'http://127.0.0.1:1/nope';
+  const keepFetch = global.fetch;
+  global.fetch = async () => { throw new Error('scanner down'); };
+  await processor.finalize(ULID_H);
+  global.fetch = keepFetch;
+  cfg.SCAN_PROVIDERS = keepProviders;
+  const heldJob = await jobs.get(ULID_H);
+  ok('a broken scanner holds the job (fail closed)', heldJob.state === 'scanning');
+  ok('a held job keeps its pending file for the retry',
+    fs.existsSync(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_H}.webp`)));
+  ok('a broken scanner does not publish', !heldJob.url);
+
+  srv.close();
+
   console.log(`\n${passed} checks passed`);
   stub.close();
 }

@@ -32,6 +32,15 @@ setInterval(() => {
   tusServer.cleanUpExpiredUploads().then((n) => {
     if (n > 0) logger.info({ removed: n }, 'cleaned up expired uploads');
   }).catch((err) => logger.error({ err: err.message }, 'expired upload cleanup failed'));
+
+  // Retry anything the scan gate is holding, and any storage push that failed.
+  // Without this a scanner or backend that recovers mid-day waits for a restart.
+  try {
+    processor.sweepHeld();
+    mirror.recoverOnBoot();
+  } catch (err) {
+    logger.error({ err: err.message }, 'hourly retry sweep failed');
+  }
 }, 60 * 60 * 1000).unref();
 
 app.listen(config.PORT, () => {
@@ -43,7 +52,7 @@ app.listen(config.PORT, () => {
     try {
       mirror.recoverOnBoot();
     } catch (err) {
-      logger.error({ err: err.message }, 'sia recovery sweep failed');
+      logger.error({ err: err.message }, 'storage recovery sweep failed');
     }
   });
 });

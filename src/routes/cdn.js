@@ -40,8 +40,11 @@ router.get('/:kind/:file', async (req, res) => {
   if (!job || job.state !== 'ready') return res.status(404).json({ error: 'Not found' });
 
   // Premium goes through /media with a signature; answering here would be a
-  // paywall bypass by redirect.
-  if (job.visibility === 'private') return res.status(404).json({ error: 'Not found' });
+  // paywall bypass by redirect. Thumbnails are exempt because they are
+  // published public by design — a locked card still shows its poster.
+  if (job.visibility === 'private' && kind !== 'thumbnails') {
+    return res.status(404).json({ error: 'Not found' });
+  }
 
   const cid = kind === 'thumbnails' ? job.s5_thumb_cid : job.s5_cid;
   if (!cid) {
@@ -51,11 +54,11 @@ router.get('/:kind/:file', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
-  // Content addressed bytes cannot change, so cache hard.
-  res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}, immutable`);
+  // The blob is immutable but this *mapping* is not: a delete or a visibility
+  // change has to take effect. Caching the redirect at the edge would keep
+  // serving a taken-down file for the whole TTL, so keep it short and private.
+  res.set('Cache-Control', `private, max-age=${config.MEDIA_CDN_CACHE_SEC}`);
   return res.redirect(302, s5.downloadUrl(cid));
 });
-
-router.get('/', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 module.exports = router;

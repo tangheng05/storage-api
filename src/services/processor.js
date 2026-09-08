@@ -35,6 +35,24 @@ async function exists(p) {
   }
 }
 
+// Two accommodations publishCleared depends on: idempotent, so a retry after a
+// partial publish finds the file already at dest rather than throwing; and a
+// copy fallback, because the pending and published dirs are separate env vars
+// and may sit on different mounts.
+async function move(from, to) {
+  try {
+    await fsp.rename(from, to);
+  } catch (err) {
+    if (err.code === 'EXDEV') {
+      await fsp.copyFile(from, to);
+      await fsp.rm(from, { force: true });
+      return;
+    }
+    if (err.code === 'ENOENT' && (await exists(to))) return;
+    throw err;
+  }
+}
+
 const PENDING_DIRS = {
   video: config.PENDING_VIDEOS_DIR,
   audio: config.PENDING_AUDIO_DIR,
@@ -164,27 +182,28 @@ async function discardPending(job) {
 }
 
 // Video scans via its thumbnail: catches an opening frame, misses one that
-// turns bad later. Frame sampling is the upgrade path. Audio has no affordable
-// check at all.
-function scanTargetFor(job) {
-  const p = pendingPaths(job);
-  if (job.media_type === 'image') return p.file;
-  if (job.media_type === 'video') return p.thumb;
-  return null;
-}
-
+// turns bad later. Frame sampling is the upgrade path.
 async function runScan(id, job) {
-  const visibility = job.visibility || 'public';
-  const immutable = mirror.isImmutable({ mediaType: job.media_type, visibility });
-  const target = scanTargetFor(job);
-
-  if (!target || !(await exists(target))) {
-    // Expected for audio; for a video it means publishing unchecked.
-    if (job.media_type === 'video') {
-      logger.warn({ id }, 'no thumbnail to scan, video published unchecked');
-    }
+  const p = pendingPaths(job);
+  if (job.media_type === 'audio') {
     return { verdict: scan.VERDICT.CLEAN, provider: 'unscannable', score: null, labels: [] };
   }
+
+  const isVideo = job.media_type === 'video';
+  const target = isVideo ? p.thumb : p.file;
+
+  // A missing target is a scan failure, never a pass. Thumbnail generation is
+  // allowed to fail, and treating that as clean let an uploader skip the gate
+  // entirely with a file whose frames do not decode.
+  if (!target || !(await exists(target))) {
+    throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
+  }
+
+  // The threshold follows the bytes being scanned, not the job. For video that
+  // is the thumbnail, which always publishes public — so it can land on S5 even
+  // when the video itself goes to s3d.
+  const visibility = isVideo ? 'public' : job.visibility || 'public';
+  const immutable = mirror.isImmutable({ mediaType: job.media_type, visibility });
 
   return scan.scanFile({ filePath: target, mediaType: job.media_type, immutable });
 }
@@ -200,7 +219,7 @@ async function publishCleared(id, job) {
   const finalPath = path.join(finalDir, file);
 
   await fsp.mkdir(finalDir, { recursive: true });
-  await fsp.rename(p.file, finalPath);
+  await move(p.file, finalPath);
 
   let thumbPath = null;
   if (job.pending_thumb) {
@@ -208,7 +227,7 @@ async function publishCleared(id, job) {
     // poster.
     thumbPath = path.join(config.THUMBS_DIR, job.pending_thumb);
     await fsp.mkdir(config.THUMBS_DIR, { recursive: true });
-    await fsp.rename(p.thumb, thumbPath);
+    await move(p.thumb, thumbPath);
   }
 
   const published = await mirror.publish({
@@ -259,44 +278,31 @@ async function finalize(id, { approved = false } = {}) {
   const job = await jobs.get(id);
   if (!job || !job.pending_file) return;
 
+  // Breaks the loop a partially-failed publish would otherwise cause: with no
+  // bytes there is nothing to scan, and re-running would synthesize a verdict
+  // for a file that is not there.
+  if (!(await exists(pendingPaths(job).file))) {
+    await jobs.update(id, {
+      state: 'failed',
+      error: 'pending_file_missing',
+      pending_file: null,
+      pending_thumb: null,
+    });
+    logger.error({ id }, 'pending file missing at the scan gate');
+    return;
+  }
+
+  // Persisted, not just passed: a restart between the moderator's decision and
+  // this task draining would otherwise re-scan and silently re-hold the file.
+  const cleared = approved || job.approved === true;
+  let scanError = null;
+  let result;
+  // Only the scan is guarded. A publish failure must not be recorded as a
+  // scanner outage, and must not re-enter this branch and publish a second time.
   try {
-    const result = approved
+    result = cleared
       ? { verdict: scan.VERDICT.CLEAN, provider: 'moderator', score: null, labels: [] }
       : await runScan(id, job);
-
-    const patch = {
-      scan_verdict: result.verdict,
-      scan_provider: result.provider,
-      scan_score: result.score,
-      scan_labels: result.labels,
-      // Kept even when cleared: a later takedown can blocklist it.
-      scan_phash: result.phash || null,
-      scan_error: null,
-      scanned_at: new Date().toISOString(),
-    };
-
-    if (result.verdict === scan.VERDICT.REJECT) {
-      await discardPending(job);
-      await jobs.update(id, {
-        ...patch,
-        state: 'rejected',
-        error: 'rejected_by_scan',
-        pending_file: null,
-        pending_thumb: null,
-      });
-      logger.warn({ id, labels: result.labels, matched: result.matched }, 'upload rejected by scan');
-      return;
-    }
-
-    if (result.verdict === scan.VERDICT.REVIEW) {
-      // Stays in pending: reachable by nobody, still there to approve.
-      await jobs.update(id, { ...patch, state: 'review' });
-      logger.info({ id, score: result.score, labels: result.labels }, 'upload held for review');
-      return;
-    }
-
-    await jobs.update(id, patch);
-    await publishCleared(id, job);
   } catch (err) {
     if (scan.enabled() && !config.SCAN_FAIL_OPEN) {
       // An outage that delays uploads is cheaper than one bad file going live
@@ -306,9 +312,44 @@ async function finalize(id, { approved = false } = {}) {
       return;
     }
     logger.error({ id, err: err.message }, 'scan failed, publishing anyway (fail open)');
-    await jobs.update(id, { scan_verdict: 'error', scan_error: err.message });
-    await publishCleared(id, job);
+    result = { verdict: scan.VERDICT.CLEAN, provider: 'error', score: null, labels: [] };
+    scanError = err.message;
   }
+
+  const patch = {
+    scan_verdict: result.verdict,
+    scan_provider: result.provider,
+    scan_score: result.score,
+    scan_labels: result.labels,
+    // Kept even when cleared: a later takedown can blocklist it.
+    scan_phash: result.phash || null,
+    scan_error: scanError,
+    scanned_at: new Date().toISOString(),
+  };
+
+  // The verdict is persisted before it is acted on, so a failure while acting
+  // cannot be mistaken for a failure to decide.
+  if (result.verdict === scan.VERDICT.REJECT) {
+    await jobs.update(id, {
+      ...patch, state: 'rejected', error: 'rejected_by_scan',
+    });
+    await discardPending(job);
+    await jobs.update(id, { pending_file: null, pending_thumb: null });
+    logger.warn({ id, labels: result.labels, matched: result.matched }, 'upload rejected by scan');
+    return;
+  }
+
+  if (result.verdict === scan.VERDICT.REVIEW) {
+    // Stays in pending: reachable by nobody, still there to approve.
+    await jobs.update(id, { ...patch, state: 'review' });
+    logger.info({ id, score: result.score, labels: result.labels }, 'upload held for review');
+    return;
+  }
+
+  await jobs.update(id, patch);
+  // Outside the scan guard on purpose. A throw here leaves the job in
+  // 'scanning' for the boot sweep to retry, and publishCleared is idempotent.
+  await publishCleared(id, job);
 }
 
 // --- Entry points ---
@@ -340,14 +381,16 @@ async function convert(id) {
         : await convertVideo(id, src, probe);
     }
 
-    await fsp.rm(src, { force: true });
-    await fsp.rm(`${src}.json`, { force: true });
-
+    // State first: a crash between deleting the source and recording the new
+    // state left a converted job looking unprocessed, and recovery then failed
+    // it for a source that was already gone.
     await jobs.update(id, {
       state: 'scanning',
       filename: (job && job.filename) || null,
       ...meta,
     });
+    await fsp.rm(src, { force: true });
+    await fsp.rm(`${src}.json`, { force: true });
     queue.push(() => finalize(id), queue.SCAN_LANE);
   } catch (err) {
     logger.error({ id, err: err.message }, 'processing failed');
@@ -363,16 +406,31 @@ function enqueue(id, mediaType) {
   queue.push(() => convert(id), lane);
 }
 
+// Re-runs the gate for anything still held by a scan error. Called on boot and
+// on the hourly timer, so a scanner that recovers mid-day needs no restart.
+function sweepHeld() {
+  jobs
+    .listByState(['scanning'])
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    .slice(0, config.SCAN_RECOVER_LIMIT)
+    .forEach((job) => queue.push(() => finalize(job.id), queue.SCAN_LANE));
+}
+
 // 'uploading' is left to tus. 'review' is left to the moderator: re-scanning
 // would re-flag it and overwrite their queue entry.
 function recoverOnBoot() {
-  jobs.listByState(['queued', 'processing']).forEach((job) => {
+  // Oldest first: readdir order is unspecified, and with a recovery cap an
+  // arbitrary subset would otherwise be retried forever while the rest starved.
+  const oldestFirst = (a, b) => String(a.created_at).localeCompare(String(b.created_at));
+
+  jobs.listByState(['queued', 'processing']).sort(oldestFirst).forEach((job) => {
     logger.info({ id: job.id, media_type: job.media_type }, 'recovering interrupted job');
     enqueue(job.id, job.media_type);
   });
 
   jobs
     .listByState(['scanning'])
+    .sort(oldestFirst)
     .slice(0, config.SCAN_RECOVER_LIMIT)
     .forEach((job) => {
       logger.info({ id: job.id }, 'recovering upload held at the scan gate');
@@ -380,4 +438,4 @@ function recoverOnBoot() {
     });
 }
 
-module.exports = { enqueue, finalize, discardPending, recoverOnBoot };
+module.exports = { enqueue, finalize, discardPending, recoverOnBoot, sweepHeld };

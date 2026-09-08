@@ -6,9 +6,18 @@ const processor = require('../services/processor');
 const queue = require('../services/queue');
 const scan = require('../services/scan');
 const logger = require('../services/logger');
-const { requireUploadKey } = require('../middleware/auth');
+const { requireModerationKey } = require('../middleware/auth');
 
 const router = express.Router();
+
+// The note is written into a line-oriented file that scan.js parses back, so an
+// unvalidated id could inject extra live hashes with a newline.
+const appendHash = async (hash, id) => {
+  const tag = jobs.ULID_REGEX.test(String(id || '')) ? id : 'manual';
+  const note = `${hash.toLowerCase()}  # ${tag} ${new Date().toISOString()}`;
+  await fsp.appendFile(config.SCAN_BLOCKLIST_PATH, `${note}
+`);
+};
 
 /*
 | Review queue. Master key only - operator endpoints, not user-facing.
@@ -21,7 +30,7 @@ const router = express.Router();
 | is refused automatically from then on - no model, no API call, no cost.
 */
 
-router.use(requireUploadKey);
+router.use(requireModerationKey);
 
 // GET /moderation/queue — everything waiting on a human.
 router.get('/queue', async (req, res, next) => {
@@ -58,10 +67,14 @@ router.post('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: `Job is ${job.state}, not awaiting review` });
     }
 
-    await jobs.update(id, { state: 'scanning', reviewed_by: req.headers['x-delete-owner'] || null });
+    await jobs.update(id, {
+      state: 'scanning',
+      approved: true,
+      reviewed_by: req.headers['x-delete-owner'] || null,
+    });
     queue.push(() => processor.finalize(id, { approved: true }), queue.SCAN_LANE);
     logger.info({ id }, 'held upload approved by moderator');
-    return res.json({ id, state: 'publishing' });
+    return res.json({ id, state: 'scanning' });
   } catch (err) {
     return next(err);
   }
@@ -78,23 +91,22 @@ router.post('/:id/reject', async (req, res, next) => {
       return res.status(409).json({ error: `Job is ${job.state}, not awaiting review` });
     }
 
-    await processor.discardPending(job);
-
-    const addToBlocklist = req.body?.blocklist !== false;
-    let blocklisted = false;
-    if (addToBlocklist && job.scan_phash) {
-      const note = `${job.scan_phash}  # ${id} rejected ${new Date().toISOString()}`;
-      await fsp.appendFile(config.SCAN_BLOCKLIST_PATH, `${note}\n`);
-      blocklisted = true;
-    }
-
+    // State first: deleting the files before recording the decision left the job
+    // in 'review' pointing at bytes that no longer exist.
     await jobs.update(id, {
       state: 'rejected',
       error: 'rejected_by_moderator',
       reviewed_by: req.headers['x-delete-owner'] || null,
-      pending_file: null,
-      pending_thumb: null,
     });
+    await processor.discardPending(job);
+    await jobs.update(id, { pending_file: null, pending_thumb: null });
+
+    const addToBlocklist = req.body?.blocklist !== false;
+    let blocklisted = false;
+    if (addToBlocklist && job.scan_phash) {
+      await appendHash(job.scan_phash, id);
+      blocklisted = true;
+    }
     logger.info({ id, blocklisted }, 'held upload rejected by moderator');
     return res.json({ id, state: 'rejected', blocklisted });
   } catch (err) {
@@ -122,8 +134,7 @@ router.post('/blocklist', async (req, res, next) => {
       return res.status(400).json({ error: 'phash must be 16 hex characters, or pass a job id' });
     }
 
-    const note = `${hash.toLowerCase()}  # ${id || 'manual'} ${new Date().toISOString()}`;
-    await fsp.appendFile(config.SCAN_BLOCKLIST_PATH, `${note}\n`);
+    await appendHash(hash, id);
     logger.info({ id, hash }, 'hash added to scan blocklist');
     return res.json({ blocklisted: hash.toLowerCase() });
   } catch (err) {

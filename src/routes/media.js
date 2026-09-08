@@ -41,6 +41,19 @@ const exists = async (p) => {
   }
 };
 
+// States in which no file has been published yet, so a visibility change is
+// recorded on the job for finalize to honour rather than performed on disk.
+const PRE_PUBLICATION = ['uploading', 'queued', 'processing', 'scanning', 'review'];
+
+const prePublicationJob = async (id) => {
+  try {
+    const job = await jobs.get(id);
+    return job && PRE_PUBLICATION.includes(job.state) ? job : null;
+  } catch {
+    return null;
+  }
+};
+
 // Master key only. Moves the file between the public and private dir — a
 // rename on the same volume, so no URL is valid for both states at once.
 // Idempotent.
@@ -72,10 +85,16 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
   */
   if (target === 'private') {
     let job = null;
+    let unreadable = false;
     try {
       job = await jobs.get(id);
-    } catch { /* unreadable record; fall through to the ordinary path */ }
-    if (job && job.storage_backend === 's5') {
+    } catch {
+      // An unreadable record is exactly when we cannot prove the file never
+      // reached S5, so refuse rather than move it and hope. A record that is
+      // simply absent is a legacy file that predates all of this — allowed.
+      unreadable = true;
+    }
+    if (unreadable || (job && (job.storage_backend === 's5' || job.s5_cid))) {
       logger.warn({ id, kind: req.params.kind }, 'refused premium flip for s5-published media');
       return res.status(409).json({
         error: 'immutable_public_media',
@@ -90,6 +109,27 @@ router.post('/:kind/:file/visibility', requireUploadKey, async (req, res) => {
     const alreadyLocal = await exists(to);
 
     if (!alreadyLocal && !(await exists(from))) {
+      /*
+      | The file may simply not be published yet — it is still at the scan gate
+      | in a pending dir. Record the intent and let finalize publish it to the
+      | right place.
+      |
+      | 404ing here was a paywall hole: the job kept visibility 'public',
+      | finalize read that and published to S5, and the flip could never be
+      | retried because the 409 guard then fires. serey-api swallows the 404, so
+      | the post showed premium while the bytes were free and permanent.
+      */
+      const pending = await prePublicationJob(id);
+      if (pending) {
+        await jobs.update(id, { visibility: target });
+        logger.info({ id, kind: req.params.kind, target }, 'visibility recorded pre-publication');
+        return res.json({
+          id,
+          visibility: target,
+          url: await buildUrlFor(id, req.params.kind, target, file),
+          published: false,
+        });
+      }
       return res.status(404).json({ error: 'Media not found' });
     }
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /*
-| Check that every file we believe is on Sia is actually on Sia, and the right
+| Check that every object we believe is on a backend really is, at the right
 | size. A backup nobody has checked is a rumour.
 |
-|   node scripts/sia-verify.js            # report only
-|   node scripts/sia-verify.js --fix      # re-upload anything missing or wrong
+|   node scripts/storage-verify.js            # report only
+|   node scripts/storage-verify.js --fix      # re-upload anything missing or wrong
 |
 | Exits 1 when drift is found, so it can be run from cron and alert on failure.
 */
@@ -52,7 +52,7 @@ async function main() {
     let remote = null;
     try {
       remote = job.s5_cid
-        ? await s5.exists(job.s5_cid)
+        ? await s5.stat(job.s5_cid)
         : await sia.headObject(job.sia_key);
     } catch (err) {
       problems.push({ id: job.id, key: ref, issue: `head failed: ${err.message}` });
@@ -70,6 +70,20 @@ async function main() {
     } else {
       ok += 1;
     }
+
+    const thumbRef = job.s5_thumb_cid || job.sia_thumb_key;
+    if (thumbRef) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const t = job.s5_thumb_cid
+          ? await s5.stat(job.s5_thumb_cid)
+          : await sia.headObject(job.sia_thumb_key);
+        if (!t) problems.push({ id: job.id, key: thumbRef, issue: 'thumbnail missing on backend' });
+        else ok += 1;
+      } catch (err) {
+        problems.push({ id: job.id, key: thumbRef, issue: `thumb head failed: ${err.message}` });
+      }
+    }
   }
 
   console.log(`checked ${tracked.length} tracked object(s): ${ok} ok, ${problems.length} problem(s)`);
@@ -81,7 +95,7 @@ async function main() {
   if (FIX && problems.length) {
     console.log('\nre-uploading...');
     for (const p of problems) {
-      await mirror.retry(p.id);
+      await mirror.retry(p.id, { force: true });
       console.log(`  retried ${p.id}`);
     }
   }
