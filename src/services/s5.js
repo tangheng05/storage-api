@@ -21,22 +21,26 @@ const logger = require('./logger');
 | has a private prefix and a working delete.
 */
 
-const BLAKE3_MULTIHASH = 0x1e;
-
 /*
-| Verified against a live s5-dart v0.14.1 node, NOT against the spec.
+| Both constants come from a live s5-dart v0.14.1 node, NOT from the spec.
 |
-| docs.sfive.net documents a blob CID as 0x5b 0x82 0x1e + hash + size rendered
-| base16 with an 'f' multibase prefix. A real node returns 0x26 0x1f + hash +
-| size rendered base58btc with 'z'. The hash and the size encoding match the
-| spec exactly; only the magic and the multibase differ.
+| docs.sfive.net says BLAKE3 is 0x1e and a blob CID is 0x5b 0x82 0x1e + hash +
+| size in base16 with an 'f' prefix. A real node uses 0x1f and returns 0x26 0x1f
+| + hash + size in base58btc with 'z'. The hash itself and the little-endian
+| size bytes match the spec exactly; only these two things differ.
 |
-| So the spec is wrong here, or describes a version nothing ships. Either way
-| putFile prefers the CID the node reports and only falls back to this, and
-| stat() confirms the result is retrievable before any publish is reported --
-| a mismatch fails the upload rather than writing a dead URL into a post row.
+| 0x1f is confirmed twice over: it is the byte in CIDs the node produces, and it
+| is the only prefix the node accepts in tus hash metadata. Both were found with
+| scripts/s5-probe-tus.js -- rerun it against a new node version before trusting
+| these again.
+|
+| putFile still prefers the CID the node reports, and stat() proves the object
+| is retrievable before any publish is reported, so a future format change fails
+| the upload instead of writing a dead URL into a post row.
 */
-const CID_MAGIC = [0x26, 0x1f];
+const BLAKE3_MULTIHASH = 0x1f;
+const CID_BLOB_MAGIC = 0x26;
+const CID_MAGIC = [CID_BLOB_MAGIC, BLAKE3_MULTIHASH];
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -129,10 +133,10 @@ async function uploadSmall(filePath) {
   }
 }
 
-// The node will not hash for us, so it goes in the creation metadata. That
-// encoding is the least documented part of the S5 API: the spec says only
-// "BASE64URL(0x1e || hash)" and never shows a request, and tus requires base64
-// metadata values, hence the double encode. Verify against a live node.
+// The node will not hash for us, so it goes in the creation metadata, under the
+// key 'hash', as tus-base64 of base64url(0x1f || hash) -- encoded twice because
+// the inner value is what the node decodes and tus requires base64 metadata.
+// Found empirically; the spec's version is rejected with "Invalid hash found".
 async function uploadTus(filePath, { size, hash }) {
   const raw = Buffer.concat([Buffer.from([BLAKE3_MULTIHASH]), Buffer.from(hash, 'hex')]);
   const hashValue = raw.toString('base64url');
