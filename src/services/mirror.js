@@ -51,6 +51,20 @@ function isImmutable({ mediaType, visibility = 'public' }) {
   return backendFor({ mediaType, visibility }) === 's5';
 }
 
+// The CID a client may be shown. It is the decentralised handle for the bytes:
+// anyone holding it can fetch and verify them from any S5 node, forever, with
+// no route back. Only public media ever reaches S5, so this should always be
+// null for premium — but the paywall is re-checked here anyway rather than
+// trusted from three separate callers.
+function publicCid(job) {
+  // Off until we choose to tell users their media is on Sia at all. Flipping it
+  // on is one env var; what it cannot do is be taken back, so it stays a
+  // deliberate decision rather than a default.
+  if (!config.S5_EXPOSE_CID) return null;
+  if (!job || job.visibility === 'private') return null;
+  return job.s5_cid || null;
+}
+
 // Opt-in via SIA_PUBLIC_BASE_URL; without it the push is backup-only and the
 // URL stays local. S5 has no such mode.
 function s3dServing() {
@@ -280,6 +294,7 @@ async function purge(job) {
 }
 
 module.exports = {
+  publicCid,
   publish,
   retry,
   purge,

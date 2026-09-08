@@ -4,6 +4,7 @@ const path = require('path');
 const config = require('../config');
 const jobs = require('../services/jobs');
 const mirror = require('../services/mirror');
+const scan = require('../services/scan');
 const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -26,7 +27,11 @@ router.get('/:id/status', validateId, async (req, res, next) => {
     }
     if (!job) return res.status(404).json({ error: 'Not found' });
     const { id, state, url, thumbnail_url, error, duration_sec, width, height, filename } = job;
-    return res.json({ id, state, url, thumbnail_url, error, duration_sec, width, height, filename });
+    return res.json({
+      id, state, url, thumbnail_url, error, duration_sec, width, height, filename,
+      s5_cid: mirror.publicCid(job),
+      scan_reasons: scan.publicReasons(job),
+    });
   } catch (err) {
     return next(err);
   }

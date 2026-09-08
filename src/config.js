@@ -133,6 +133,10 @@ module.exports = {
   // S5 documents no unpin route, so a delete is best effort at most. Off by
   // default rather than pretend to a takedown we cannot perform.
   S5_UNPIN_ENABLED: process.env.S5_UNPIN_ENABLED === 'true',
+  // Whether a client may see the CID of its own public media. A CID is a
+  // permanent public handle that cannot be withdrawn once shown, so this stays
+  // off until showing it is a decision someone made on purpose.
+  S5_EXPOSE_CID: process.env.S5_EXPOSE_CID === 'true',
 
   // S5's own blobs, read back out of s3d for the node and for its peers.
   //

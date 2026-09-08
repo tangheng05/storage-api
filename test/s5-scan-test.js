@@ -48,6 +48,9 @@ process.env.MEDIA_CDN_BASE_URL = 'https://cdn.test.local';
 process.env.S5_ENABLED = 'true';
 process.env.S5_NODE_URL = `http://127.0.0.1:${PORT}`;
 process.env.S5_AUTH_TOKEN = 'tok';
+// Deliberately on: the premium checks below are only meaningful when CID
+// exposure is at its most permissive.
+process.env.S5_EXPOSE_CID = 'true';
 process.env.S5_TYPES = 'image,video';
 process.env.SCAN_ENABLED = 'true';
 process.env.SCAN_PROVIDERS = 'phash';
@@ -334,6 +337,17 @@ async function main() {
   });
   ok('cdn refuses a premium job', (await call('GET', `/cdn/images/${ULID_P}.webp`)).status === 404);
 
+  // A CID is a permanent, unretractable public handle: anyone holding one can
+  // fetch and verify the bytes from any S5 node, forever. Handing one out for
+  // paywalled media would be a paywall bypass that no takedown could undo, so
+  // the status route must withhold it even though the route itself is
+  // authenticated and the job should never have had a CID in the first place.
+  const premiumStatus = JSON.parse((await call('GET', `/images/${ULID_P}/status`)).text);
+  ok('a premium job reports no CID even when one is set on the record',
+    premiumStatus.s5_cid === null);
+  const publicStatus = JSON.parse((await call('GET', `/images/${ULID_A}/status`)).text);
+  ok('a public job does report its CID', typeof publicStatus.s5_cid === 'string');
+
   // A premium video's thumbnail is public by design, so it must still resolve.
   const ULID_T = '01J0000000000000000000000E';
   await jobs.create(ULID_T, {
@@ -341,6 +355,23 @@ async function main() {
   });
   ok('cdn still serves a premium video thumbnail',
     (await call('GET', `/cdn/thumbnails/${ULID_T}.jpg`)).status === 200);
+
+  // Same rule on the video route, which has its own response shape. The public
+  // thumbnail above proves a premium video *does* hold a CID for its poster, so
+  // this is not a vacuous check.
+  const premiumVideo = JSON.parse((await call('GET', `/videos/${ULID_T}/status`)).text);
+  ok('a premium video reports no CID', premiumVideo.s5_cid === null);
+
+  // A refusal with no stated reason leaves someone holding a legitimate photo
+  // unable to tell a false positive from a real violation, and gives them
+  // nothing to fix or appeal.
+  const rejStatus = JSON.parse((await call('GET', `/images/${ULID_B}/status`)).text);
+  ok('a rejected upload tells the uploader why',
+    Array.isArray(rejStatus.scan_reasons) && rejStatus.scan_reasons.includes('previously_removed'));
+  ok('but not the score behind it, which would teach the threshold',
+    rejStatus.scan_reasons.every((r) => !String(r).includes(':')));
+  const cleanStatus = JSON.parse((await call('GET', `/images/${ULID_A}/status`)).text);
+  ok('a clean upload reports no reasons at all', cleanStatus.scan_reasons === null);
 
   const ULID_Q = '01J0000000000000000000000F';
   await jobs.create(ULID_Q, { state: 'scanning', media_type: 'image', s5_cid: 'fbadbad' });

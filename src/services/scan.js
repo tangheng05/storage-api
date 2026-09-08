@@ -384,4 +384,31 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
   };
 }
 
-module.exports = { scanFile, perceptualHash, decide, enabled, VERDICT };
+/*
+| What an uploader is told when their file is refused or held.
+|
+| Providers encode the score into the label ('sexual:87'), and handing that
+| number back teaches a determined uploader exactly where the threshold sits, so
+| only the category survives here. The full label stays on the job record for
+| moderators. Naming the category is the point: 'rejected' alone leaves someone
+| with a legitimate photo no way to tell a false positive from a real one.
+*/
+const REASON_ALIASES = {
+  blocklisted: 'previously_removed',
+  blocked: 'unsafe',
+};
+
+function publicReasons(job) {
+  if (!job || (job.state !== 'rejected' && job.state !== 'review')) return null;
+  const labels = Array.isArray(job.scan_labels) ? job.scan_labels : [];
+  const categories = [...new Set(
+    labels.map((label) => String(label).split(':')[0].trim()).filter(Boolean),
+  )].map((category) => REASON_ALIASES[category] || category);
+  // Never an empty list: a refusal with no stated reason is the thing this is
+  // here to prevent.
+  return categories.length ? categories : ['unspecified'];
+}
+
+module.exports = {
+  scanFile, perceptualHash, decide, enabled, VERDICT, publicReasons,
+};

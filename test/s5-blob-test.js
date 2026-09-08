@@ -30,7 +30,13 @@ const HASH = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcdefg';
 const BLOB = Buffer.from('serey blob bytes '.repeat(64));
 const OBAO = Buffer.from('bao outboard tree bytes');
 
+// A premium object, in the same bucket, to prove the route cannot reach it.
+// Premium never actually reaches S5 -- mirror.js routes it to s3d or local disk
+// -- but the bucket may be shared, so the prefix has to hold on its own.
+const SECRET = Buffer.from('paywalled video bytes');
+
 const store = new Map([
+  ['private/videos/secret.mp4', SECRET],
   [`1/${HASH}`, BLOB],
   [`1/${HASH}.obao`, OBAO],
 ]);
@@ -141,6 +147,21 @@ async function main() {
   check('only .obao is accepted as a suffix', dotted.status === 400);
 
   const posted = await request(appPort, `/blob/1/${HASH}`, { method: 'POST' });
+
+  // The `1/` prefix is fixed in the route, so no request shape can address a
+  // key outside it. A premium file sharing the bucket must stay unreachable.
+  const attempts = [
+    '/blob/1/private%2Fvideos%2Fsecret.mp4',
+    '/blob/private/videos/secret.mp4',
+    '/blob/1/..%2Fprivate%2Fvideos%2Fsecret.mp4',
+  ];
+  let leaked = false;
+  for (const path of attempts) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await request(appPort, path);
+    if (res.status === 200 || res.body.includes(SECRET)) leaked = true;
+  }
+  check('no request shape reaches a key outside the 1/ prefix', !leaked);
   check('the route is read-only', posted.status === 405);
 
   server.close();
