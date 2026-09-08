@@ -192,20 +192,72 @@ async function runScan(id, job) {
   const isVideo = job.media_type === 'video';
   const target = isVideo ? p.thumb : p.file;
 
-  // A missing target is a scan failure, never a pass. Thumbnail generation is
-  // allowed to fail, and treating that as clean let an uploader skip the gate
-  // entirely with a file whose frames do not decode.
-  if (!target || !(await exists(target))) {
-    throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
-  }
-
   // The threshold follows the bytes being scanned, not the job. For video that
   // is the thumbnail, which always publishes public — so it can land on S5 even
   // when the video itself goes to s3d.
   const visibility = isVideo ? 'public' : job.visibility || 'public';
   const immutable = mirror.isImmutable({ mediaType: job.media_type, visibility });
 
-  return scan.scanFile({ filePath: target, mediaType: job.media_type, immutable });
+  if (!target || !(await exists(target))) {
+    // An image with no file is a broken job and should fail. A video with no
+    // thumbnail is different: ffmpeg is allowed to fail on one, and treating
+    // that as clean let an uploader skip the gate with a file whose frames do
+    // not decode. Holding it for a person is the honest answer — throwing here
+    // would park it in 'scanning' and retry the same missing frame hourly,
+    // forever, where nobody would ever see it.
+    if (!isVideo) {
+      throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
+    }
+    logger.warn({ id }, 'no thumbnail to scan, holding video for review');
+    return {
+      verdict: scan.VERDICT.REVIEW, provider: 'unscannable', score: null, labels: ['no_thumbnail'],
+    };
+  }
+
+  const result = await scan.scanFile({ filePath: target, mediaType: job.media_type, immutable });
+  if (!isVideo) return result;
+  return withSampledFrames(id, job, result, immutable);
+}
+
+/*
+| Scan a few more frames spread across the video and keep the worst verdict.
+|
+| One thumbnail only ever proves something about the opening seconds. This does
+| not make video scanning complete — nothing short of every frame would — but it
+| catches the obvious case of a clean intro over bad content. Costs one
+| classifier call per extra frame, so SCAN_VIDEO_FRAMES defaults to 1.
+*/
+async function withSampledFrames(id, job, primary, immutable) {
+  const extra = Math.max(0, config.SCAN_VIDEO_FRAMES - 1);
+  const duration = job.duration_sec || 0;
+  if (!extra || !duration) return primary;
+
+  const rank = { clean: 0, review: 1, reject: 2 };
+  const source = pendingPaths(job).file;
+  let worst = primary;
+
+  for (let i = 1; i <= extra; i += 1) {
+    const at = (duration * i) / (extra + 1);
+    const framePath = path.join(config.PENDING_THUMBS_DIR, `.${job.id}.f${i}.jpg`);
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await ffmpeg.makeThumbnail(source, framePath, at);
+      // eslint-disable-next-line no-await-in-loop
+      const r = await scan.scanFile({ filePath: framePath, mediaType: 'video', immutable });
+      if (rank[r.verdict] > rank[worst.verdict]) worst = r;
+    } catch (err) {
+      // A frame that will not decode is not a verdict. The primary thumbnail
+      // already gave us one.
+      logger.warn({ id, at, err: err.message }, 'frame scan skipped');
+    } finally {
+      // eslint-disable-next-line no-await-in-loop
+      await fsp.rm(framePath, { force: true });
+    }
+    if (worst.verdict === scan.VERDICT.REJECT) break;
+  }
+
+  // Keep the thumbnail's fingerprint: that is the frame a takedown blocklists.
+  return { ...worst, phash: primary.phash };
 }
 
 // Local move first, so the file is where mirror.localPathFor expects it and a

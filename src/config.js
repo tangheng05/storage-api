@@ -156,14 +156,29 @@ module.exports = {
   // 0 is exact; 5 tolerates a re-encode or a light crop.
   SCAN_PHASH_DISTANCE: num(process.env.SCAN_PHASH_DISTANCE, 5),
   SCAN_HTTP_URL: process.env.SCAN_HTTP_URL || '',
+  // Google Cloud Vision SafeSearch. Plain API key, no SDK, 1000 images/month
+  // free. Enable the Vision API on the key or every call 403s.
+  SCAN_VISION_API_KEY: process.env.SCAN_VISION_API_KEY || '',
+  // Which SafeSearch categories count. Only 'adult' and 'violence' by default.
+  // 'racy' fires on swimwear, tight clothing and a lot of ordinary photography,
+  // so it would fill the review queue with nothing; 'medical' fires on
+  // legitimate health content; 'spoof' just means "looks like a meme". Add them
+  // only if you want that traffic.
+  SCAN_VISION_CATEGORIES: csv(process.env.SCAN_VISION_CATEGORIES, 'adult,violence'),
+  // Frames sampled per video, spread across its duration. 1 scans only the
+  // generated thumbnail, which catches an opening frame and misses a video that
+  // turns bad later. Each extra frame is another classifier call.
+  SCAN_VIDEO_FRAMES: num(process.env.SCAN_VIDEO_FRAMES, 1),
   SCAN_HTTP_KEY: process.env.SCAN_HTTP_KEY || '',
   SCAN_HTTP_KEY_HEADER: process.env.SCAN_HTTP_KEY_HEADER || 'authorization',
   // Score bands, 0..1: reject refuses, review holds for a human.
   SCAN_REJECT_SCORE: num(process.env.SCAN_REJECT_SCORE, 0.9),
   SCAN_REVIEW_SCORE: num(process.env.SCAN_REVIEW_SCORE, 0.6),
-  // Stricter for S5: no undo there, so the middle band goes to a human.
-  SCAN_REJECT_SCORE_IMMUTABLE: num(process.env.SCAN_REJECT_SCORE_IMMUTABLE, 0.75),
-  SCAN_REVIEW_SCORE_IMMUTABLE: num(process.env.SCAN_REVIEW_SCORE_IMMUTABLE, 0.35),
+  // S5 cannot be undone, so its review band is wider -- but the reject band is
+  // the same. Nothing legitimate should ever be auto-deleted; borderline
+  // content waits for a person instead.
+  SCAN_REJECT_SCORE_IMMUTABLE: num(process.env.SCAN_REJECT_SCORE_IMMUTABLE, 0.9),
+  SCAN_REVIEW_SCORE_IMMUTABLE: num(process.env.SCAN_REVIEW_SCORE_IMMUTABLE, 0.5),
   // Fail closed: a broken scanner holds the job in 'scanning' for retry rather
   // than publishing it unchecked.
   SCAN_FAIL_OPEN: process.env.SCAN_FAIL_OPEN === 'true',

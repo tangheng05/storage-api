@@ -389,6 +389,57 @@ async function main() {
     fs.existsSync(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_H}.webp`)));
   ok('a broken scanner does not publish', !heldJob.url);
 
+  // --- video ---
+  // A video whose thumbnail failed to generate must be held for a person, not
+  // published unchecked and not parked in 'scanning' to retry a frame that will
+  // never exist.
+  const ULID_V = '01J0000000000000000000000J';
+  await fsp.writeFile(path.join(root, dirs.PENDING_VIDEOS_DIR, `${ULID_V}.mp4`), Buffer.alloc(64, 1));
+  await jobs.create(ULID_V, {
+    state: 'scanning',
+    media_type: 'video',
+    visibility: 'public',
+    pending_file: `${ULID_V}.mp4`,
+    pending_thumb: null,
+  });
+  await processor.finalize(ULID_V);
+  const noThumb = await jobs.get(ULID_V);
+  ok('a video with no thumbnail is held for review', noThumb.state === 'review');
+  ok('it is not published', !noThumb.url);
+  ok('it says why', (noThumb.scan_labels || []).includes('no_thumbnail'));
+  ok('its pending file survives for the moderator',
+    fs.existsSync(path.join(root, dirs.PENDING_VIDEOS_DIR, `${ULID_V}.mp4`)));
+
+  // --- vision likelihood mapping ---
+  // SafeSearch answers in words; only VERY_LIKELY should ever auto-reject.
+  const cfg2 = require('../src/config');
+  const keepProv = cfg2.SCAN_PROVIDERS;
+  cfg2.SCAN_PROVIDERS = ['vision'];
+  cfg2.SCAN_VISION_API_KEY = 'test-key';
+  const keepFetch2 = global.fetch;
+  const safeSearch = (annotation) => {
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({ responses: [{ safeSearchAnnotation: annotation }] }),
+    });
+    return scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  };
+
+  ok('VERY_LIKELY adult is rejected',
+    (await safeSearch({ adult: 'VERY_LIKELY', violence: 'VERY_UNLIKELY' })).verdict === 'reject');
+  ok('LIKELY adult goes to a human',
+    (await safeSearch({ adult: 'LIKELY', violence: 'VERY_UNLIKELY' })).verdict === 'review');
+  ok('POSSIBLE adult still publishes',
+    (await safeSearch({ adult: 'POSSIBLE', violence: 'VERY_UNLIKELY' })).verdict === 'clean');
+  // racy is not in SCAN_VISION_CATEGORIES by default, so it must not count
+  ok('VERY_LIKELY racy is ignored by default',
+    (await safeSearch({ adult: 'VERY_UNLIKELY', racy: 'VERY_LIKELY' })).verdict === 'clean');
+  ok('the worst configured category wins',
+    (await safeSearch({ adult: 'VERY_UNLIKELY', violence: 'VERY_LIKELY' })).verdict === 'reject');
+
+  global.fetch = keepFetch2;
+  cfg2.SCAN_PROVIDERS = keepProv;
+
   srv.close();
 
   console.log(`\n${passed} checks passed`);

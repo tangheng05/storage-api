@@ -119,6 +119,9 @@ async function runHttp(filePath, { mediaType }) {
       method: 'POST',
       headers,
       signal: ac.signal,
+      // undici does not strip a custom auth header across origins, so a
+      // redirecting classifier could otherwise exfiltrate the key and the file.
+      redirect: 'error',
       body: JSON.stringify({
         media_type: mediaType,
         content_base64: buf.toString('base64'),
@@ -159,7 +162,69 @@ function decide(score, { immutable }) {
   return VERDICT.CLEAN;
 }
 
-const RUNNERS = { phash: runPhash, http: runHttp };
+/*
+| Google Cloud Vision SafeSearch. Plain API key over fetch -- no SDK, no OAuth,
+| no dependency -- and 1000 images/month free.
+|
+| It answers with likelihood words, not numbers, so they are mapped onto the
+| score bands. With the default thresholds that means only VERY_LIKELY is auto
+| rejected and LIKELY waits for a person: deliberately lenient, because a false
+| reject deletes a real user's upload and a false review costs a click.
+*/
+const LIKELIHOOD = {
+  VERY_UNLIKELY: 0,
+  UNLIKELY: 0.25,
+  POSSIBLE: 0.5,
+  LIKELY: 0.75,
+  VERY_LIKELY: 1,
+};
+
+async function runVision(filePath) {
+  if (!config.SCAN_VISION_API_KEY) throw new Error('scan_vision_api_key_not_set');
+  const buf = await fsp.readFile(filePath);
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
+  let body;
+  try {
+    const res = await fetch(
+      `https://vision.googleapis.com/v1/images:annotate?key=${config.SCAN_VISION_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal: ac.signal,
+        redirect: 'error',
+        body: JSON.stringify({
+          requests: [{
+            image: { content: buf.toString('base64') },
+            features: [{ type: 'SAFE_SEARCH_DETECTION' }],
+          }],
+        }),
+      },
+    );
+    if (!res.ok) throw new Error(`vision returned ${res.status}`);
+    body = await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const first = body?.responses?.[0];
+  if (first?.error) throw new Error(`vision: ${first.error.message}`);
+  const annotation = first?.safeSearchAnnotation;
+  if (!annotation) throw new Error('vision returned no safeSearchAnnotation');
+
+  let score = 0;
+  let label = null;
+  for (const category of config.SCAN_VISION_CATEGORIES) {
+    const value = LIKELIHOOD[annotation[category]];
+    if (value === undefined) continue;
+    if (value > score) { score = value; label = `${category}:${annotation[category]}`; }
+  }
+
+  return { provider: 'vision', score, labels: label ? [label] : [] };
+}
+
+const RUNNERS = { phash: runPhash, http: runHttp, vision: runVision };
 
 // Throws only when a provider is broken; what that means is policy
 // (SCAN_FAIL_OPEN), decided by the caller.
