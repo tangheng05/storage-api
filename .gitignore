@@ -5,3 +5,6 @@ data/
 
 # Local agent/editor state, never part of the repo.
 .claude/
+
+# Local hand-off notes, not part of the repo.
+HANDOFF.md
