@@ -22,6 +22,15 @@ const logger = require('./logger');
 
 const VERDICT = { CLEAN: 'clean', REVIEW: 'review', REJECT: 'reject' };
 
+// Every category has to be listed in safetySettings for BLOCK_NONE to apply,
+// even the ones SCAN_GEMINI_CATEGORIES ignores.
+const HARM_CATEGORY_ALL = {
+  HARM_CATEGORY_SEXUALLY_EXPLICIT: 1,
+  HARM_CATEGORY_DANGEROUS_CONTENT: 1,
+  HARM_CATEGORY_HARASSMENT: 1,
+  HARM_CATEGORY_HATE_SPEECH: 1,
+};
+
 function enabled() {
   return config.SCAN_ENABLED && config.SCAN_PROVIDERS.length > 0;
 }
@@ -224,7 +233,87 @@ async function runVision(filePath) {
   return { provider: 'vision', score, labels: label ? [label] : [] };
 }
 
-const RUNNERS = { phash: runPhash, http: runHttp, vision: runVision };
+/*
+| Gemini, reading its own safetyRatings instead of asking it to classify.
+|
+| A prompt would be the obvious approach and is the wrong one: the model can
+| refuse, and the wording drifts between versions, so the thing deciding whether
+| a user's upload gets deleted would be non-deterministic. The ratings come back
+| on every response and are the same classifier Google applies internally.
+|
+| Safety blocking is turned OFF on purpose. Not to permit anything -- we never
+| use the generated text -- but because a hard block returns an error where we
+| need a score. BLOCK_NONE keeps the ratings flowing.
+*/
+const HARM_PROBABILITY = {
+  NEGLIGIBLE: 0,
+  LOW: 0.25,
+  MEDIUM: 0.6,
+  HIGH: 0.9,
+};
+
+const GEMINI_MIME = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
+
+async function runGemini(filePath) {
+  if (!config.SCAN_GEMINI_API_KEY) throw new Error('scan_gemini_api_key_not_set');
+  const buf = await fsp.readFile(filePath);
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), config.SCAN_TIMEOUT_MS);
+  let body;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.SCAN_GEMINI_MODEL}:generateContent?key=${config.SCAN_GEMINI_API_KEY}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: ac.signal,
+      redirect: 'error',
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: 'Describe this image in one word.' },
+            { inline_data: { mime_type: GEMINI_MIME[ext] || 'image/jpeg', data: buf.toString('base64') } },
+          ],
+        }],
+        safetySettings: Object.keys(HARM_CATEGORY_ALL).map((category) => ({
+          category, threshold: 'BLOCK_NONE',
+        })),
+      }),
+    });
+    if (!res.ok) throw new Error(`gemini returned ${res.status} ${(await res.text()).slice(0, 200)}`);
+    body = await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Ratings live on the candidate normally, or on promptFeedback when the input
+  // itself tripped something. A hard block is itself a strong signal, so it
+  // scores 1 rather than erroring.
+  const ratings = body?.candidates?.[0]?.safetyRatings
+    || body?.promptFeedback?.safetyRatings
+    || [];
+  if (body?.promptFeedback?.blockReason === 'SAFETY' && !ratings.length) {
+    return { provider: 'gemini', score: 1, labels: ['blocked'] };
+  }
+  if (!ratings.length) throw new Error('gemini returned no safetyRatings');
+
+  let score = 0;
+  let label = null;
+  for (const r of ratings) {
+    if (!config.SCAN_GEMINI_CATEGORIES.includes(r.category)) continue;
+    const value = HARM_PROBABILITY[r.probability];
+    if (value === undefined || value <= score) continue;
+    score = value;
+    label = `${r.category.replace('HARM_CATEGORY_', '').toLowerCase()}:${r.probability}`;
+  }
+
+  return { provider: 'gemini', score, labels: label ? [label] : [] };
+}
+
+const RUNNERS = {
+  phash: runPhash, http: runHttp, vision: runVision, gemini: runGemini,
+};
 
 // Throws only when a provider is broken; what that means is policy
 // (SCAN_FAIL_OPEN), decided by the caller.

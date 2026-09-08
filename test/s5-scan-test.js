@@ -437,6 +437,33 @@ async function main() {
   ok('the worst configured category wins',
     (await safeSearch({ adult: 'VERY_UNLIKELY', violence: 'VERY_LIKELY' })).verdict === 'reject');
 
+  // --- gemini safetyRatings mapping ---
+  cfg2.SCAN_PROVIDERS = ['gemini'];
+  cfg2.SCAN_GEMINI_API_KEY = 'test-key';
+  const rated = (ratings, extra = {}) => {
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({ candidates: [{ safetyRatings: ratings }], ...extra }),
+    });
+    return scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  };
+  const sexual = (p) => [{ category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', probability: p }];
+
+  ok('HIGH sexually explicit is rejected', (await rated(sexual('HIGH'))).verdict === 'reject');
+  ok('MEDIUM goes to a human', (await rated(sexual('MEDIUM'))).verdict === 'review');
+  ok('LOW still publishes', (await rated(sexual('LOW'))).verdict === 'clean');
+  ok('NEGLIGIBLE publishes', (await rated(sexual('NEGLIGIBLE'))).verdict === 'clean');
+  // harassment is not in SCAN_GEMINI_CATEGORIES by default
+  ok('an unconfigured category is ignored',
+    (await rated([{ category: 'HARM_CATEGORY_HARASSMENT', probability: 'HIGH' }])).verdict === 'clean');
+  // a hard block with no ratings is itself the signal
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ promptFeedback: { blockReason: 'SAFETY' } }),
+  });
+  ok('a safety block counts as a reject',
+    (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
+
   global.fetch = keepFetch2;
   cfg2.SCAN_PROVIDERS = keepProv;
 

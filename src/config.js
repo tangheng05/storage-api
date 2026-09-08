@@ -165,6 +165,17 @@ module.exports = {
   // legitimate health content; 'spoof' just means "looks like a meme". Add them
   // only if you want that traffic.
   SCAN_VISION_CATEGORIES: csv(process.env.SCAN_VISION_CATEGORIES, 'adult,violence'),
+  // Gemini, as an alternative to Vision. Its safetyRatings are read directly
+  // rather than prompting it to classify -- a prompt can drift between model
+  // versions and can be refused, a rating cannot. An AI Studio key works as is,
+  // with no API to enable.
+  SCAN_GEMINI_API_KEY: process.env.SCAN_GEMINI_API_KEY || '',
+  // Whatever your key has access to. Flash models are the cheap ones.
+  SCAN_GEMINI_MODEL: process.env.SCAN_GEMINI_MODEL || 'gemini-2.0-flash',
+  SCAN_GEMINI_CATEGORIES: csv(
+    process.env.SCAN_GEMINI_CATEGORIES,
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT,HARM_CATEGORY_DANGEROUS_CONTENT',
+  ),
   // Frames sampled per video, spread across its duration. 1 scans only the
   // generated thumbnail, which catches an opening frame and misses a video that
   // turns bad later. Each extra frame is another classifier call.
