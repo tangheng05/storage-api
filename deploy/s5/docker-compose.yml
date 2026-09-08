@@ -1,0 +1,35 @@
+# S5 node — content-addressed storage for PUBLIC media.
+#
+# Runs on the same VPS as the storage API. Two hostnames matter and they are not
+# the same one:
+#
+#   S5_NODE_URL          how the storage API uploads   -> http://127.0.0.1:5050
+#   S5_DOWNLOAD_BASE_URL where the BROWSER fetches     -> https://s5.serey.io
+#
+# /cdn 302-redirects the browser at the download host, so it has to be publicly
+# reachable. Point s5.serey.io at 127.0.0.1:5050 with another NPM proxy host.
+#
+# Bytes live in whatever [store] says (see config.example.toml). With
+# [store.s3] pointed at sia.storage they land on the Sia network; with the local
+# filesystem store they land on this same disk, which buys no durability at all.
+
+services:
+  s5:
+    image: ghcr.io/s5-dev/node:latest
+    container_name: s5-node
+    restart: unless-stopped
+    # Localhost only. Everything public goes through the reverse proxy.
+    ports:
+      - "127.0.0.1:5050:5050"
+    volumes:
+      # config.toml is generated here on first boot; edit it, then restart.
+      - ./config:/config
+      # Node state. Put this on SSD.
+      - ./db:/db
+      # Upload/download staging.
+      - ./cache:/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,52 @@
+# Reference for the sections that matter in the S5 node's config.toml.
+#
+# The real file is generated at deploy/s5/config/config.toml on first boot —
+# edit that one and `docker compose restart s5`. Do not paste this over it
+# wholesale; the generated file has a [keypair] seed you must keep.
+
+[http.api]
+# MUST match the hostname the reverse proxy actually serves. The node builds
+# download URLs from this, so a mismatch produces broken links that look like a
+# caching problem. This is the classic mistake.
+domain = "s5.serey.io"
+port = 5050
+
+[keypair]
+# Generated on first boot. Signs this node's network messages. Back it up and
+# never regenerate it casually.
+# seed = "..."
+
+[accounts]
+enabled = true
+# What works without a token. Uploads must NOT be in here.
+alwaysAllowedScopes = ["registry_read", "metadata"]
+
+[database]
+path = "/db"
+
+[cache]
+path = "/cache"
+
+# --- Storage backend --------------------------------------------------------
+#
+# THE ONE DECISION THAT MATTERS. Get this wrong and the node keeps every blob on
+# this VPS's disk, which means two copies on one volume and zero protection
+# against the disk failure the second copy exists to survive.
+#
+# Use S3, pointed at your sia.storage account's s3d gateway. That is the same
+# access key / secret you get from the sia.storage dashboard under My Apps, and
+# it keeps Sia contracts and the wallet out of our hands entirely.
+
+[store.s3]
+accessKey = "<from the sia.storage dashboard>"
+secretKey = "<from the sia.storage dashboard>"
+bucket = "<your bucket>"
+endpointUrl = "<the s3d gateway URL, include https://>"
+
+# Do NOT use [store.sia]. It talks to renterd directly, the S5 docs call both
+# renterd and that integration experimental, and the Sia Foundation has since
+# stopped recommending renterd at all. Doubly stale.
+#
+# The local filesystem store is fine for a throwaway test node and useless for
+# durability. If you use it, know that you are testing plumbing, not backing
+# anything up.

@@ -204,15 +204,35 @@ S5_NODE_URL=http://127.0.0.1:5050
 S5_AUTH_TOKEN=
 ```
 
-The S5 node runs as a container and expects a reverse proxy in front:
+The S5 node runs as a container behind the proxy. Compose file and an annotated
+config reference live in [`deploy/s5/`](s5/):
 
 ```bash
-docker run -d --name s5-node   -p 127.0.0.1:5050:5050   -v /var/lib/s5/config:/config -v /var/lib/s5/db:/db   --restart unless-stopped ghcr.io/s5-dev/node:latest
+cd /opt/serey-storage-api/deploy/s5
+docker compose up -d
+docker compose logs -f s5        # config.toml is generated on first boot
 ```
 
-Put `/db` on SSD. `config.toml` is generated on first boot; set `[http.api]
-domain` to the hostname you actually serve it on, then mint a token and put it
-in `S5_AUTH_TOKEN`.
+Then edit `deploy/s5/config/config.toml`:
+
+- `[http.api] domain` must match the hostname the proxy serves (`s5.serey.io`).
+  The node builds download URLs from it, and a mismatch gives broken links that
+  look like a caching problem.
+- `[store.s3]` — point it at your sia.storage s3d gateway using the access key
+  and secret from that dashboard's My Apps page. **This is the decision that
+  matters**: with the default local filesystem store the blobs sit on this same
+  VPS disk, so you get two copies on one volume and no protection against the
+  failure the second copy exists for.
+
+`docker compose restart s5` after editing, then mint a token for
+`S5_AUTH_TOKEN`.
+
+Add `s5.serey.io` as a second NPM proxy host pointing at `127.0.0.1:5050`. It
+has to be publicly reachable: `/cdn` 302-redirects the *browser* there, so a
+localhost-only node produces dead media links. Cache hard on that hostname —
+content-addressed bytes never change, so `public, max-age=31536000, immutable`
+is always correct for the blob (but not for the `/cdn` redirect itself, which
+has to be able to reflect a delete).
 
 Keep `USE_X_ACCEL=false` unless you have pasted the `/internal-media/` location
 into NPM's Advanced box — nothing else honours `X-Accel-Redirect`, and premium
