@@ -42,15 +42,19 @@ async function post(url, init, { attempts = 3 } = {}) {
       // eslint-disable-next-line no-await-in-loop
       const res = await fetch(url, { ...init, signal: ac.signal, redirect: 'error' });
       if (res.ok) return res;
+      // eslint-disable-next-line no-await-in-loop
       const body = (await res.text().catch(() => '')).slice(0, 200);
       lastError = new Error(`${res.status} ${body}`);
-      if (!TRANSIENT.has(res.status)) throw lastError;
+      lastError.retryable = TRANSIENT.has(res.status);
     } catch (err) {
-      lastError = err;
-      if (err.name === 'AbortError') lastError = new Error('scanner timed out');
+      // A throw here cannot be re-thrown to skip the retry: it would land in
+      // this same catch. The flag is what decides, not control flow.
+      lastError = err.name === 'AbortError' ? new Error('scanner timed out') : err;
+      lastError.retryable = true;
     } finally {
       clearTimeout(timer);
     }
+    if (!lastError.retryable) throw lastError;
     if (attempt < attempts) {
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, 500 * (2 ** (attempt - 1))));
