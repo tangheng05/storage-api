@@ -1,6 +1,6 @@
 # Reference for the sections that matter in the S5 node's config.toml.
 #
-# The real file is generated at deploy/s5/config/config.toml on first boot —
+# The real file is generated at /var/lib/s5/config/config.toml on first boot —
 # edit that one and `docker compose restart s5`. Do not paste this over it
 # wholesale; the generated file has a [keypair] seed you must keep.
 
@@ -47,6 +47,11 @@ endpointUrl = "<the s3d gateway URL, include https://>"
 # renterd and that integration experimental, and the Sia Foundation has since
 # stopped recommending renterd at all. Doubly stale.
 #
-# The local filesystem store is fine for a throwaway test node and useless for
-# durability. If you use it, know that you are testing plumbing, not backing
-# anything up.
+# The local filesystem store is fine for proving the pipeline and useless for
+# durability — it writes a second copy of every public file to this same disk.
+# Use it to validate the upload path, not as the end state:
+#
+#   [store.local]
+#   path = "/data"
+#
+# On a 37 GB volume that also holds the originals, do not leave it there.

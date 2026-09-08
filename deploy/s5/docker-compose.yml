@@ -9,9 +9,12 @@
 # /cdn 302-redirects the browser at the download host, so it has to be publicly
 # reachable. Point s5.serey.io at 127.0.0.1:5050 with another NPM proxy host.
 #
-# Bytes live in whatever [store] says (see config.example.toml). With
-# [store.s3] pointed at sia.storage they land on the Sia network; with the local
-# filesystem store they land on this same disk, which buys no durability at all.
+# State lives under /var/lib/s5, deliberately outside the checkout: /config
+# holds a keypair seed that cannot be regenerated, and a redeploy into a fresh
+# directory would strand it.
+#
+# Where the bytes land is [store] in config.toml, and it is the decision that
+# decides whether any of this buys durability. See config.example.toml.
 
 services:
   s5:
@@ -23,11 +26,14 @@ services:
       - "127.0.0.1:5050:5050"
     volumes:
       # config.toml is generated here on first boot; edit it, then restart.
-      - ./config:/config
+      - /var/lib/s5/config:/config
       # Node state. Put this on SSD.
-      - ./db:/db
+      - /var/lib/s5/db:/db
       # Upload/download staging.
-      - ./cache:/cache
+      - /var/lib/s5/cache:/cache
+      # Only used by the local filesystem store. Harmless otherwise, and it
+      # means switching [store] to local needs no compose change.
+      - /var/lib/s5/data:/data
     logging:
       driver: json-file
       options:
