@@ -13,7 +13,7 @@ const PORT = 9149;
 
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'silent';
 process.env.UPLOAD_API_KEY = 'blob-test';
-process.env.ALLOWED_ORIGINS = 'https://serey.io';
+process.env.ALLOWED_ORIGINS = 'https://example.com';
 process.env.S5_BLOB_ENABLED = 'true';
 process.env.S5_BLOB_S3_ENDPOINT = `http://127.0.0.1:${PORT}`;
 process.env.S5_BLOB_S3_BUCKET = 'media';

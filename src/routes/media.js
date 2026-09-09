@@ -188,7 +188,7 @@ async function buildUrlFor(id, kind, visibility, file) {
   return `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
 }
 
-// No membership logic by design: serey-api decides who is entitled and proves
+// No membership logic by design: the main API decides who is entitled and proves
 // it with a signature; we only check the signature is ours and still fresh.
 router.get('/:kind/:file', async (req, res) => {
   const parsed = parseFile(req.params.kind, req.params.file);

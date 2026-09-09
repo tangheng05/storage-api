@@ -58,7 +58,7 @@ module.exports = {
     './data/private/images',
   ),
 
-  // Shared with serey-api, which mints the signatures. Empty means /media/ serves nothing.
+  // Shared with the main API, which mints the signatures. Empty means /media/ serves nothing.
   MEDIA_SIGNING_SECRET: process.env.MEDIA_SIGNING_SECRET || '',
   USE_X_ACCEL: process.env.USE_X_ACCEL === 'true',
   X_ACCEL_PREFIX: (process.env.X_ACCEL_PREFIX || '/internal-media').replace(
@@ -125,7 +125,7 @@ module.exports = {
   S5_BLOB_S3_SECRET_KEY: process.env.S5_BLOB_S3_SECRET_KEY || '',
   S5_BLOB_CACHE_SEC: num(process.env.S5_BLOB_CACHE_SEC, 31536000),
 
-  // serey-api freezes this into post rows permanently, so never let a raw CID or portal domain into it.
+  // The main API freezes this into post rows permanently, so never let a raw CID or portal domain into it.
   MEDIA_CDN_BASE_URL: trimSlash(process.env.MEDIA_CDN_BASE_URL) || `${PUBLIC_BASE_URL}/cdn`,
   // How long a takedown takes to clear Cloudflare's edge; purge the CF cache too if it must be immediate.
   MEDIA_CDN_CACHE_SEC: num(process.env.MEDIA_CDN_CACHE_SEC, 3600),

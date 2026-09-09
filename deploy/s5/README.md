@@ -37,7 +37,7 @@ Then edit `/var/lib/s5/config/config.toml`:
 
 ```toml
 [http.api]
-domain = 's5.serey.io'      # must match what the proxy serves. The node routes
+domain = 's5.example.com'      # must match what the proxy serves. The node routes
 port = 5050                 # on Host, and a mismatch gives "No valid S5
 bind = '0.0.0.0'            # dnslink record found".
 
@@ -47,7 +47,7 @@ secretKey = "<from step 2>"
 bucket = "media"
 endpointUrl = "http://s3d:8000"
 # REQUIRED. Without it every read fails -- see "S5 cannot read from s3d" below.
-cdnUrls = ["https://storage.serey.io/blob/"]
+cdnUrls = ["https://media.example.com/blob/"]
 ```
 
 `docker compose restart s5`, then mint a token for `S5_AUTH_TOKEN` and set

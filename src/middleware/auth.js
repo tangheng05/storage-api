@@ -43,7 +43,7 @@ function requireUploadKey(req, res, next) {
 }
 
 // Operator routes take their own key, not the upload key: the upload key is
-// held by serey-api, CI and every .env copy, and should not let its holder
+// held by the main API, CI and every .env copy, and should not let its holder
 // approve held content or write the blocklist. Unset means off (503).
 function requireModerationKey(req, res, next) {
   if (!config.MODERATION_API_KEY) {

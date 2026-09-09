@@ -32,7 +32,7 @@ function base58decode(str) {
 }
 
 const cid = process.argv[2];
-const base = (process.argv[3] || 'https://storage.serey.io/blob/').replace(/\/?$/, '/');
+const base = (process.argv[3] || 'https://media.example.com/blob/').replace(/\/?$/, '/');
 
 if (!cid) {
   console.error('usage: node scripts/s5-cid-to-key.js <cid> [baseUrl]');

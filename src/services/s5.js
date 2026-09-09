@@ -182,7 +182,7 @@ async function uploadTus(filePath, { size, hash }) {
 // Node's CID wins when given (spec's format is the unreliable one); stat()
 // still verifies retrievability before reporting success, because a node can
 // 204 a blob that never resolves, which would freeze a dead URL into a
-// serey-api post row.
+// database post row.
 async function putFile({ filePath }) {
   if (!enabled()) throw new Error('s5_not_configured');
   const { cid: computed, hash, size } = await hashFile(filePath);

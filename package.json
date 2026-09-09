@@ -1,7 +1,8 @@
 {
-  "name": "serey-video-storage-api",
+  "name": "media-storage-api",
   "version": "1.0.0",
-  "description": "Video, audio and image upload/storage API for Serey (tus resumable uploads, content scanning, S5/s3d backends)",
+  "description": "Resumable media upload and storage API: tus uploads, ffmpeg/sharp normalisation, content scanning, and content-addressed publishing to Sia via S5.",
+  "private": true,
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -10,6 +11,10 @@
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
     "test:blob": "node test/s5-blob-test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tangheng05/storage-api.git"
   },
   "engines": {
     "node": ">=18.0.0"

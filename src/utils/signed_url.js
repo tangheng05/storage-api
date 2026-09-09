@@ -3,11 +3,11 @@ const crypto = require('crypto');
 const config = require('../config');
 
 // Private objects are delivered through /media/... only to a caller holding a
-// valid signature, minted by serey-api. It covers the object path AND the
+// valid signature, minted by the main API. It covers the object path AND the
 // expiry, so neither can be edited without invalidating it -- a leaked URL
 // stops working once `exp` passes.
 
-// Keep this format in sync with serey-api's utils/premium_util.js signMediaUrl().
+// Keep this format in sync with the main API's utils/premium_util.js signMediaUrl().
 const payload = (object_path, exp) => `${object_path}|${exp}`;
 
 const sign = (object_path, exp) =>

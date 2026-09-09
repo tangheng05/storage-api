@@ -1,4 +1,4 @@
-# VPS Setup Runbook — storage.serey.io
+# VPS Setup Runbook — media.example.com
 
 Target: fresh Hetzner VPS, Ubuntu 24.04, using **Nginx Proxy Manager (NPM)**
 for TLS/reverse-proxy and the **Cloudflare proxy (orange cloud)** in front.
@@ -15,7 +15,7 @@ it is resizable, so video storage can grow without migrating the server.
 >    the proxy is fine; it's the *playback* traffic that can trigger
 >    enforcement (throttling or being asked to move). If playback volume gets
 >    meaningful, the safe move is a second hostname for delivery only, set to
->    DNS-only (grey cloud), e.g. `video-cdn.serey.io` → same VPS. The app
+>    DNS-only (grey cloud), e.g. `video-cdn.example.com` → same VPS. The app
 >    supports this via `PUBLIC_BASE_URL` — no code change needed.
 
 ## 1. Base system
@@ -74,7 +74,7 @@ Config (systemd reads it from `/etc/serey-storage/.env`):
 mkdir -p /etc/serey-storage
 cat > /etc/serey-storage/.env <<'EOF'
 PORT=8080
-PUBLIC_BASE_URL=https://storage.serey.io
+PUBLIC_BASE_URL=https://media.example.com
 UPLOAD_API_KEY=<GENERATE: openssl rand -hex 32>
 TUS_DIR=/var/lib/serey-storage/tus
 JOBS_DIR=/var/lib/serey-storage/jobs
@@ -87,7 +87,7 @@ MAX_DURATION_SEC=14400
 MAX_IMAGE_BYTES=20971520
 MAX_IMAGE_DIMENSION=2560
 UPLOAD_EXPIRY_MS=86400000
-ALLOWED_ORIGINS=https://serey.io,https://www.serey.io
+ALLOWED_ORIGINS=https://example.com,https://www.example.com
 CREATES_PER_HOUR=30
 TRUST_PROXY_HOPS=2
 EOF
@@ -109,39 +109,40 @@ journalctl -u storage-api -f   # check it started
 
 ## 6. Cloudflare DNS
 
-In the Cloudflare dashboard for serey.io:
+In the Cloudflare dashboard for example.com:
 
 - Add an **A record**: name `storage`, value = VPS public IP, **Proxied (orange
   cloud)**.
 - SSL/TLS mode: **Full (strict)** once NPM has its certificate.
 - Cloudflare → Rules → Cache Rules → *Bypass cache* for
-  `storage.serey.io/files/*` (upload traffic should never be cached) **and for
-  `storage.serey.io/media/*`**. The paywall relies on Cloudflare honouring
+  `media.example.com/files/*` (upload traffic should never be cached) **and for
+  `media.example.com/media/*`**. The paywall relies on Cloudflare honouring
   `private, no-store`; one "ignore query string" rule would turn a subscriber's
   signed URL into a public one.
 
 ## 7. Nginx Proxy Manager
 
-> **Reality check for the current deployment (storage.serey.io):** the NPM
-> "Custom Nginx Configuration" (Advanced) box is **empty**, and NPM forwards
-> everything to the app. Media is therefore served by `express.static` in
-> `src/app.js`, not by nginx from disk. Verified: an existing file returns 206
-> with `Accept-Ranges: bytes`, a missing one returns the app's JSON 404.
+> **Two ways to serve media, and you must know which one you are on.** If the
+> NPM "Custom Nginx Configuration" (Advanced) box is empty, NPM forwards
+> everything to the app and media is served by `express.static` in
+> `src/app.js`, not by nginx from disk. Check with a range request: nginx and
+> Express both answer 206, but a missing file returns the app's JSON 404 only
+> in the second case.
 >
-> That means **none of the `location` blocks below are currently applied**, and
-> paywalled media needs no NPM change at all — set `USE_X_ACCEL=false` and
-> Express serves private files through `/media/` after checking the signature.
-> The private dirs have no `express.static` mount, so nothing else can reach
-> them.
+> On the Express path, paywalled media needs no NPM configuration at all. Set
+> `USE_X_ACCEL=false` and Express serves private files through `/media/` after
+> checking the signature; the private directories have no `express.static`
+> mount, so nothing else can reach them.
 >
-> The blocks below are the intended setup if static serving is ever moved to
-> nginx for performance. Only then set `USE_X_ACCEL=true` and add the
-> `/media/`, `/internal-media/` and `/private/` locations.
-
+> The `location` blocks below apply only once static serving is moved to nginx.
+> Do that and you must also add `/media/`, `/internal-media/` and `/private/`,
+> and set `USE_X_ACCEL=true`. Until then, treat the blocks as the target state
+> rather than as protections you already have -- in particular the
+> `/pending/ deny all` block and the `/moderation` IP allowlist.
 
 Create a **Proxy Host**:
 
-- Domain: `storage.serey.io`
+- Domain: `media.example.com`
 - Forward to: `http://127.0.0.1:8080`. **If NPM itself runs in Docker it cannot
   reach the host's loopback** -- use the bridge gateway (`172.18.0.1:8080`, or
   whatever `docker network inspect` reports) or the forward returns 502.
@@ -152,7 +153,7 @@ Create a **Proxy Host**:
   video seeking):
 
 The intended `location` blocks live in
-[`nginx-storage.serey.io.conf`](nginx-storage.serey.io.conf) — that file is the
+[`nginx-media.example.com.conf`](nginx-media.example.com.conf) — that file is the
 single source, so paste from it rather than from a copy here. It previously
 existed twice and the copies drifted.
 
@@ -163,12 +164,12 @@ Two things in it that matter whenever static serving does move to nginx:
 - `location /cdn/` and `location /moderation/` must be proxied to the app, not
   served from disk. An S5-published file has no local copy.
 
-The `cdn.serey.io` server block at the bottom of that file is **commented out**:
+The `cdn.example.com` server block at the bottom of that file is **commented out**:
 `listen ... ssl` with no `ssl_certificate` is a hard error and would stop nginx
 loading the whole file. Uncomment it only after certbot has issued the cert. With
-NPM you do not need it at all — add `cdn.serey.io` as a second Proxy Host
+NPM you do not need it at all — add `cdn.example.com` as a second Proxy Host
 pointing at the same app, or leave `MEDIA_CDN_BASE_URL` empty and public media
-resolves through `storage.serey.io/cdn/`.
+resolves through `media.example.com/cdn/`.
 
 If NPM runs in Docker, mount the video dirs into the NPM container
 (`-v /var/www/serey-videos:/var/www/serey-videos:ro`) so the static
@@ -183,15 +184,15 @@ Verify the private tree is genuinely unreachable after applying this — a plain
 request must 403/404 even though the file exists:
 
 ```bash
-curl -sI https://storage.serey.io/private/videos/<ulid>.mp4   # expect 404
-curl -sI https://storage.serey.io/media/videos/<ulid>.mp4     # expect 403 (unsigned)
+curl -sI https://media.example.com/private/videos/<ulid>.mp4   # expect 404
+curl -sI https://media.example.com/media/videos/<ulid>.mp4     # expect 403 (unsigned)
 ```
 
 ## 7b. New env for the scan gate and S5
 
 ```bash
 # Operator key for /moderation. Separate from UPLOAD_API_KEY on purpose: that
-# one is held by serey-api and CI. Unset leaves the routes disabled (503).
+# one is held by the main API and CI. Unset leaves the routes disabled (503).
 MODERATION_API_KEY=$(openssl rand -hex 32)
 
 # The gate itself. phash alone only catches re-uploads of content already taken
@@ -232,7 +233,7 @@ Three settings in the node's `config.toml` that are not optional:
   key minted with `docker compose run --rm s3d keys create s5`. With the default
   local filesystem store the blobs sit on this same VPS disk -- two copies on
   one volume, and no protection against the failure the second copy exists for.
-- `cdnUrls` pointed at `https://storage.serey.io/blob`. **Without it every read
+- `cdnUrls` pointed at `https://media.example.com/blob`. **Without it every read
   fails.** S5's S3 store reads only through presigned URLs, which s3d treats as
   anonymous and refuses; the node then reports an integrity error because it
   hashed the 403 body. `deploy/s5/README.md` has the full account.
@@ -286,16 +287,16 @@ docker exec s3d s3d status     # Uploaded should climb, Pending stay small
 ## 9. Smoke test
 
 ```bash
-curl https://storage.serey.io/health
+curl https://media.example.com/health
 # → {"ok":true}
 
-curl -X POST https://storage.serey.io/files \
+curl -X POST https://media.example.com/files \
   -H "Tus-Resumable: 1.0.0" -H "Upload-Length: 10"
 # → 401 (no key) — auth is working
 ```
 
 Then run a real upload with the frontend snippet below or
-`ENDPOINT=https://storage.serey.io UPLOAD_API_KEY=<key> node test/upload-test.js video.mp4`.
+`ENDPOINT=https://media.example.com UPLOAD_API_KEY=<key> node test/upload-test.js video.mp4`.
 
 ## Frontend integration (tus-js-client)
 
@@ -306,7 +307,7 @@ const UPLOAD_KEY = import.meta.env.VITE_UPLOAD_API_KEY; // same value as server 
 
 function uploadVideo(file, { onProgress, onReady, onError }) {
   const upload = new tus.Upload(file, {
-    endpoint: 'https://storage.serey.io/files',
+    endpoint: 'https://media.example.com/files',
     chunkSize: 50 * 1024 * 1024,            // MUST stay < 100MB (Cloudflare Pro cap)
     retryDelays: [0, 3000, 10000, 30000, 60000],
     headers: { 'x-upload-key': UPLOAD_KEY },
@@ -317,7 +318,7 @@ function uploadVideo(file, { onProgress, onReady, onError }) {
       const id = upload.url.split('/').pop();
       // Poll until processing finishes (usually seconds).
       for (;;) {
-        const res = await fetch(`https://storage.serey.io/videos/${id}/status`, {
+        const res = await fetch(`https://media.example.com/videos/${id}/status`, {
           headers: { 'x-upload-key': UPLOAD_KEY },
         });
         const job = await res.json();
@@ -337,9 +338,9 @@ function uploadVideo(file, { onProgress, onReady, onError }) {
 }
 ```
 
-On `onReady`, send `job.url` (and `job.thumbnail_url`) to serey-api in the post
-body — the same pattern as `image_url` today. serey-api needs no changes.
+On `onReady`, send `job.url` (and `job.thumbnail_url`) to the main API in the post
+body — the same pattern as `image_url` today. It needs no changes.
 
-Note: `getVideoPlatform` in serey-api's `src/utils/general_util.js` detects
-Serey-hosted videos by hostname; add `https://storage.serey.io/videos/` to that
+Note: `getVideoPlatform` in the consuming API's `src/utils/general_util.js` detects
+Serey-hosted videos by hostname; add `https://media.example.com/videos/` to that
 list so embeds are treated as SEREY videos.

@@ -3,7 +3,7 @@
 | Push already-published media onto a storage backend. The boot sweep only
 | retries publishes that *failed*, so anything predating a backend stays
 | 'skipped' forever -- this closes that gap. Durability only: the URL already
-| in serey-api is left alone, since the local file it points at is still correct.
+| in the main API is left alone, since the local file it points at is still correct.
 |
 |   node scripts/storage-backfill.js --dry-run
 |   node scripts/storage-backfill.js --type video --limit 50

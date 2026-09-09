@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 const [fileArg, bytesArg, typeArg, owner] = process.argv.slice(2);
-const ENDPOINT = (process.env.ENDPOINT || 'https://storage.serey.io').replace(/\/$/, '');
+const ENDPOINT = (process.env.ENDPOINT || 'https://media.example.com').replace(/\/$/, '');
 const KEY = process.env.UPLOAD_API_KEY;
 
 if (!fileArg || !KEY) {

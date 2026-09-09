@@ -1,20 +1,20 @@
 # Independent verification: decentralised media storage
 
-Hand this to anyone — an outside engineer, an AI agent with a shell, an auditor —
-and they can verify Serey's public media claims without any credentials and
-without trusting Serey's own systems.
+Hand this to anyone — an outside engineer, an AI agent with a shell, an auditor
+— and they can verify the operator's public media claims without any
+credentials and without trusting the operator's own systems.
 
 The verifier uploads their own file, obtains its identifier themselves, and
-then proves the stored bytes match it. Nothing is taken on Serey's word.
+then proves the stored bytes match it. Nothing is taken on the operator's word.
 
-> **Serey's master key is never shared.** The verifier is issued a token scoped
+> **The master key is never shared.** The verifier is issued a token scoped
 > to a single upload, which expires when that upload completes and cannot delete
 > anything.
 
 ## One handshake, then it is self-service
 
-The verifier picks a file and reports its **name, byte size and type**. Serey
-runs one command and returns three values:
+The verifier picks a file and reports its **name, byte size and type**. The
+operator runs one command and returns three values:
 
 ```bash
 UPLOAD_API_KEY=<master key> node scripts/grant-upload.js <filename> <bytes> <mimetype>
@@ -23,18 +23,18 @@ UPLOAD_API_KEY=<master key> node scripts/grant-upload.js <filename> <bytes> <mim
 It prints `UPLOAD_URL`, `TOKEN` and `STATUS_URL`. Hand those over. Everything
 after that the verifier does alone.
 
-Serey must also have `S5_EXPOSE_CID=true` set, or the status endpoint withholds
-the CID by design.
+The operator must also have `S5_EXPOSE_CID=true` set, or the status endpoint
+withholds the CID by design.
 
 ---
 
 ## What is being claimed
 
 1. The file is stored on the **Sia network**, split and encrypted across many
-   independent hosts.
+independent hosts.
 2. Its identifier is a **CID** — a BLAKE3 hash of the content — so the bytes can
-   be proven unaltered by anyone.
-3. **Any S5 node can locate it by CID**, not only Serey's.
+be proven unaltered by anyone.
+3. **Any S5 node can locate it by CID**, not only the operator's.
 
 Step 3 below is the one that actually proves something. The rest is context.
 
@@ -73,7 +73,7 @@ Record from the final response: `state`, `url`, and **`s5_cid`**.
 `z`. That CID was produced by the storage system from the bytes you supplied —
 you did not receive it from anyone.
 
-## Step 2 — Resolve that CID on a node Serey does not control
+## Step 2 — Resolve that CID on a node the operator does not control
 
 Open **https://cid.one/** and paste the `s5_cid` from Step 1.
 
@@ -86,15 +86,15 @@ Record:
 - The line at the very bottom, e.g. `// fetched from https://s5.garden`
 
 **Pass condition:** the bottom line names a node that is *not*
-`storage.serey.io`. That means an independent node in the S5 network resolved
+`media.example.com`. That means an independent node in the S5 network resolved
 the identifier.
 
 ---
 
 ## Step 3 — Fetch the bytes and verify the hash yourself
 
-This is the proof. Download from the storage location Step 2 reported, then hash
-what you received:
+This is the proof. Download from the storage location Step 2 reported, then
+hash what you received:
 
 ```bash
 curl -sL "<storage location URL from Step 2>" -o /tmp/blob.bin
@@ -123,8 +123,8 @@ for f in ['/tmp/blob.bin', sys.argv[1]]:
 - the hash also matches BLAKE3 of the file you uploaded, which you still have
 
 A match means the bytes are provably the exact content the CID names. It cannot
-be faked: changing one byte changes the hash. No trust in Serey is required for
-this step.
+be faked: changing one byte changes the hash. No trust in the operator is
+required for this step.
 
 ---
 
@@ -147,7 +147,7 @@ changes later.
 State plainly, with the values observed:
 
 1. The CID the system produced for your own file.
-2. Which node resolved it, and was it independent of Serey?
+2. Which node resolved it, and was it independent of the operator?
 3. Did the fetched bytes hash to the value the CID claims, and to your original?
 4. Did normal web delivery return the image?
 
@@ -159,12 +159,13 @@ State plainly, with the values observed:
 independent node can find it; the bytes are on the Sia network.
 
 **Not proved, and worth being honest about:** the bytes are *delivered* from
-Serey's server. Other nodes can locate the file, but they fetch it through
-Serey's gateway. This is a consequence of client-side encryption — the copies on
-Sia hosts are ciphertext, and only the holder of the recovery phrase can decrypt
-them, so no third party can serve the file on Serey's behalf.
+the operator's server. Other nodes can locate the file, but they fetch it
+through the operator's gateway. This is a consequence of client-side encryption
+— the copies on Sia hosts are ciphertext, and only the holder of the recovery
+phrase can decrypt them, so no third party can serve the file on the operator's
+behalf.
 
-If Serey's server is offline, the CID will not load, even though the bytes remain
+If that server is offline, the CID will not load, even though the bytes remain
 safe on Sia. Recovery means standing up another gateway with the same recovery
 phrase. That is a durability guarantee, not a high-availability one.
 
@@ -180,7 +181,7 @@ expiring signed URLs and never gets a CID.
 Content scanning cannot be tested without an account, so it is a separate
 exercise.
 
-### Anyone with a Serey account
+### Anyone with an account on the platform
 
 Upload an ordinary photo through the site — it should publish normally. Then
 upload one containing weapons or injury and report what happens.
@@ -192,13 +193,13 @@ would bury the review queue in ordinary pictures. Only sexual content and
 violence are scored, and only a high-confidence result is refused outright;
 anything borderline is held for a human rather than deleted.
 
-### Serey staff only — the deterministic demonstration
+### Operators only — the deterministic demonstration
 
 This is the better demonstration because it cannot fail ambiguously.
 
 1. Upload an image. It publishes.
 2. Record its fingerprint on the blocklist (staff endpoint, requires the
-   operator key).
+operator key).
 3. Upload the identical image again.
 
 **Expected:** the second upload is refused with `rejected_by_scan`, and no file
