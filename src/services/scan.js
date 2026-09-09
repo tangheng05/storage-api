@@ -38,6 +38,9 @@ async function post(url, init, { attempts = 3 } = {}) {
     }
     if (!lastError.retryable) throw lastError;
     if (attempt < attempts) {
+      // Logged, because a silent retry after a timeout reads to the uploader as
+      // one slow scan and leaves nothing behind to explain it.
+      logger.warn({ url: url.split('?')[0], attempt, err: lastError.message }, 'scan retry');
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, 500 * (2 ** (attempt - 1))));
     }

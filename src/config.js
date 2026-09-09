@@ -137,7 +137,10 @@ module.exports = {
   SCAN_ENABLED: process.env.SCAN_ENABLED === 'true',
   // Cheapest first; any single reject wins, so order only affects cost.
   SCAN_PROVIDERS: csv(process.env.SCAN_PROVIDERS, 'phash'),
-  SCAN_TIMEOUT_MS: num(process.env.SCAN_TIMEOUT_MS, 30000),
+  // A classifier answers in ~1s, so a generous timeout does not buy patience --
+  // it converts one hung connection into a stall the uploader waits through
+  // before the retry succeeds. Fail fast and let the retry do its job.
+  SCAN_TIMEOUT_MS: num(process.env.SCAN_TIMEOUT_MS, 10000),
   SCAN_BLOCKLIST_PATH: path.resolve(process.env.SCAN_BLOCKLIST_PATH || './data/blocklist.txt'),
   // Keyed by phash: the classifier isn't deterministic (same file has scored 0.45 then 0.85), so a retry gets the first verdict instead of a re-roll.
   SCAN_CACHE_ENABLED: process.env.SCAN_CACHE_ENABLED !== 'false',
