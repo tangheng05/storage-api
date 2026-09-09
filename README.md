@@ -1,165 +1,142 @@
-# Serey Media Storage API
+# Media Storage API
 
-Video, audio and image upload/storage for Serey, replacing the 15MB-limited
-video path on `upload.serey.io`. Accepts **resumable chunked uploads** via the
-[tus protocol](https://tus.io), normalises the media (faststart MP4 + thumbnail
-for video and AAC/M4A for audio via ffmpeg, sharp for images), scans it, and
-publishes to local disk or a decentralised backend depending on visibility.
+Upload and storage for video, audio and images. Files arrive over the
+[tus protocol](https://tus.io), so a dropped connection resumes instead of
+starting over. Whatever arrives is normalised (ffmpeg for video and audio,
+sharp for images), scanned, then published.
 
-Runs on its own Hetzner VPS behind `storage.serey.io` via **Nginx Proxy Manager
-+ the Cloudflare proxy**. The CF Pro proxy caps each request body at 100MB, so
-the frontend uploads in **50MB tus chunks** -- large files work because tus
-sends many small PATCH requests. (CF ToS restricts video *playback* through
-their CDN on Pro; if delivery volume grows, point `PUBLIC_BASE_URL` at a
-grey-cloud hostname -- no code change needed.)
+Public files go to **S5**, a content-addressing layer over the
+[Sia](https://sia.tech) network. Sia splits and encrypts a file across many
+independent hosts; S5 names it with a **CID**, the file's BLAKE3 hash. The hash
+is the address, so anyone can verify the bytes they received are the bytes that
+were stored. Paid files stay on local disk behind signed URLs and never get a
+CID.
 
-## How it works
+## How a file gets published
 
 ```
-client (tus-js-client)                 this service                       nginx
-  POST /files  ──────────────►  auth + validate + create job
-  PATCH chunks (resumable) ───►  tus FileStore (data/tus)
-  upload complete ────────────►  convert: ffprobe → remux/transcode
-                                 → thumbnail → PENDING dir (unserved)
-                              ►  finalize: scan → publish → storage backend
-  GET /videos/:id/status ─────►  { state, url, thumbnail_url, s5_cid }
-  <video src=.../videos/x.mp4>  ◄──────────────── static + Range ◄────  disk
+POST /files            create a job, validate the type
+PATCH chunks           resumable, written to a tus store
+upload complete        convert -> a PENDING dir nothing serves
+                       scan -> publish to a backend
 ```
 
-Nothing is reachable until it clears the scan gate: conversion writes to a
-`PENDING_*_DIR` that nothing serves, and only a clean verdict moves the file
-into a served directory. The gate is at publication rather than at the storage
-push, because what creates exposure is serving the bytes -- local disk included.
+Converted output waits in a `PENDING_*_DIR` that no route and no nginx block
+will serve, and only a clean verdict moves it somewhere reachable. The gate
+sits at publication rather than at the storage push because serving the bytes
+is what creates exposure, local disk included.
 
-Where a published file lands is decided by visibility, not preference:
+Visibility picks the destination. **Public** goes to S5, under a URL on your
+own hostname with the job's ULID in the path; `/cdn` resolves that to a CID
+server-side, so no CID is written into a database row and the backend stays
+swappable. **Paid** stays on local disk, served through `/media/...` with an
+HMAC signature.
 
-- **public → S5** (content addressed). The CID is the file's BLAKE3 hash. URLs
-  keep our own hostname with the ULID in the path and are resolved to a CID by
-  `/cdn`, so no CID is ever frozen into a serey-api post row.
-- **premium → local disk**, delivered through `/media/...` with an HMAC
-  signature. An s3d backend exists for a second copy but is off by default.
-
-A CID *is* the permission -- anyone who has held one keeps access forever -- so
-a public file can never become premium: `POST /media/:kind/:file/visibility`
-returns 409 for anything already on S5. Declare `visibility: 'private'` in
-`Upload-Metadata` at create time instead; that upload skips S5 entirely.
-
-The final `url` / `thumbnail_url` is sent to serey-api in the post body -- the
-same pattern as `image_url` today.
+A CID cannot be withdrawn once it exists, so a public file can never become
+paid: `POST /media/:kind/:file/visibility` returns 409 for anything already on
+S5. Declare `visibility: 'private'` in `Upload-Metadata` at create time
+instead, and the file skips S5 entirely.
 
 ## Auth
 
-One shared key. Every upload/status/delete request must send it:
+One shared key on every upload, status and delete request:
 
 ```
 x-upload-key: <UPLOAD_API_KEY>
 ```
 
-A per-upload scoped token is also issued at create time (`X-Upload-Token`),
-valid only while that job is uploading and unable to delete anything. It lets a
-browser -- or an outside verifier -- poll a job without holding the shared key.
-`scripts/grant-upload.js` mints one; see [VERIFY.md](VERIFY.md).
+Creating an upload also returns a scoped token in `X-Upload-Token`, good for
+that job only, only while it uploads, and unable to delete. A browser or an
+outside auditor can poll with it instead of the shared key
+(`scripts/grant-upload.js` mints one; see [VERIFY.md](VERIFY.md)).
 
-`/moderation/*` takes its own `MODERATION_API_KEY` instead -- the upload key is
-held by serey-api and CI, which should not be enough to write the blocklist.
-Unset leaves those routes disabled (503).
+`/moderation/*` uses its own `MODERATION_API_KEY`, since the upload key goes to
+other services and should not be enough to write the blocklist.
 
-## API
+## Routes
 
-| Method | Path | Description |
+| Method | Path | |
 |---|---|---|
-| POST/PATCH/HEAD | `/files[/:id]` | tus 1.0.0 resumable upload endpoints (type inferred from mimetype) |
-| GET | `/videos/:id/status` | `{ state, url?, thumbnail_url?, duration_sec?, s5_cid?, error?, scan_reasons? }` |
-| GET | `/audio/:id/status` | `{ state, url?, duration_sec?, error?, scan_reasons? }` |
-| GET | `/images/:id/status` | `{ state, url?, width?, height?, s5_cid?, error?, scan_reasons? }` |
-| DELETE | `/videos/:id`, `/audio/:id`, `/images/:id` | Remove the file, its thumbnail, and its backend copy |
-| GET | `/media/:kind/:file` | Premium delivery, HMAC-signed URL required |
-| POST | `/media/:kind/:file/visibility` | Flip public/private; 409 once the file is on S5 |
-| GET | `/cdn/:kind/:file` | Resolves a public ULID to its CID and proxies the bytes (no auth) |
-| GET | `/blob/1/:name` | S5's own blob store, read-only, for S5 peers (no auth) |
-| POST | `/moderation/blocklist` | Blocklist a hash, by `phash` or job id (operator key) |
-| GET | `/moderation/stats` | Verdict counts and active thresholds, for tuning |
-| GET | `/health` | Liveness check (no auth) |
-| GET | `/videos/:id.mp4`, `/thumbnails/:id.jpg`, `/audio/:id.m4a`, `/images/:id.*` | Public files (nginx in prod) |
+| POST/PATCH/HEAD | `/files[/:id]` | tus 1.0.0; type comes from the mimetype |
+| GET | `/videos/:id/status` | `state`, `url`, `thumbnail_url`, `duration_sec`, `s5_cid` |
+| GET | `/images/:id/status` | `state`, `url`, `width`, `height`, `s5_cid` |
+| GET | `/audio/:id/status` | `state`, `url`, `duration_sec` |
+| DELETE | `/videos/:id`, `/images/:id`, `/audio/:id` | file, thumbnail, backend copy |
+| GET | `/media/:kind/:file` | paid delivery, signed URL required |
+| POST | `/media/:kind/:file/visibility` | flip public/private; 409 once on S5 |
+| GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
+| GET | `/blob/1/:name` | S5 blob store, read-only, for S5 peers |
+| POST | `/moderation/blocklist` | blocklist a hash by `phash` or job id |
+| GET | `/moderation/stats` | verdict counts and active thresholds |
+| GET | `/health` | liveness |
 
-Job states: `uploading → queued → processing → scanning → ready | rejected |
-failed`. `rejected` means the scanner refused it and the bytes were discarded;
-`scan_reasons` carries the categories to show the uploader, without the scores
-behind them. There is no review state -- the gate decides on a single
-threshold, so nothing waits on a person.
+States run `uploading → queued → processing → scanning → ready | rejected |
+failed`. `rejected` means the scanner refused the file and the bytes were
+thrown away; `scan_reasons` carries the categories to show the uploader,
+without the scores behind them. Nothing waits on a person.
 
-`s5_cid` is present only when `S5_EXPOSE_CID=true`, and only for public media.
-It is a permanent public handle that cannot be withdrawn once shown.
+`s5_cid` appears only with `S5_EXPOSE_CID=true`, and only for public files.
+Treat it as permanent once shown.
 
-Limits: 2GB per file (**20MB for images**), 30 new uploads per IP per hour.
+## Limits and formats
 
-- **Video**: mp4/mov/mkv/webm/avi/m4v only, ffprobe-validated
-  (h264/hevc/vp8/vp9/av1).
-- **Audio**: mp3/wav/m4a/aac/ogg/opus/flac, always transcoded to AAC/M4A.
-- **Image**: jpg/png/webp/gif/tiff/avif/heic. **jpeg, png and webp keep their
-  format**; everything else becomes WebP. Long edge capped at 2560px, never
-  upscaled. EXIF orientation is applied to the pixels (so phone photos are
-  upright) and the rest of the EXIF -- including GPS -- is dropped. Animated
-  GIF and WebP stay animated. BMP and SVG are rejected: BMP isn't in sharp's
-  bundled libvips, and rasterising untrusted SVG is an attack surface.
+2GB per file, 20MB for images, 30 new uploads per IP per hour.
 
-Note that images are re-encoded even when the format is preserved, so the
-published bytes are not byte-identical to the upload. The CID addresses the
-published file.
+- **Video** mp4, mov, mkv, webm, avi, m4v, checked with ffprobe (h264, hevc,
+  vp8, vp9, av1).
+- **Audio** mp3, wav, m4a, aac, ogg, opus, flac, always transcoded to AAC/M4A.
+- **Image** jpg, png, webp, gif, tiff, avif, heic. jpeg, png and webp keep
+  their format, the rest become WebP. Long edge capped at 2560px, never
+  upscaled. EXIF orientation is baked into the pixels so phone photos come out
+  upright, and the rest of the EXIF, GPS included, is dropped. Animated GIF and
+  WebP stay animated. BMP and SVG are refused: sharp's bundled libvips lacks
+  BMP, and rasterising untrusted SVG is an attack surface.
+
+Images are re-encoded even when the format survives, so published bytes are not
+identical to uploaded ones. The CID addresses the published file.
 
 ## Scanning
 
-Off unless `SCAN_ENABLED`. A perceptual-hash blocklist of content already taken
-down runs first, then optionally a classifier (`http`, Google Vision
-SafeSearch, or Gemini). Images are scanned directly, video via sampled frames
-(`SCAN_VIDEO_FRAMES`, default 1 = the generated thumbnail only), audio not at
-all.
+Off unless `SCAN_ENABLED`. A perceptual-hash blocklist of already-removed
+content runs first, then optionally a classifier (a plain HTTP endpoint, Google
+Vision SafeSearch, or Gemini). Images are scanned directly, video through
+sampled frames (`SCAN_VIDEO_FRAMES`, default 1 = the generated thumbnail),
+audio not at all.
 
 Verdicts are cached by perceptual hash, because the classifier is not
-deterministic -- without it a refused user could simply re-upload until they
-drew a low score. Thresholds are stricter when the destination is S5, because
-that publish cannot be undone. A broken scanner fails closed: the upload waits
-in `scanning` and is retried hourly.
+deterministic and a refused upload could otherwise be retried until it drew a
+low score. Thresholds are stricter for S5, since that publish cannot be undone.
+A broken scanner fails closed: the file waits in `scanning`, retried hourly.
 
-**This is not a CSAM solution.** That needs hash matching (Cloudflare's free
-tool, PhotoDNA) and carries its own reporting obligations.
+**This is not a CSAM solution.** That needs hash matching against a known
+database (Cloudflare's free tool, PhotoDNA) and brings reporting obligations of
+its own.
 
-## Run locally
+## Running it
 
 ```bash
 npm install
-cp .env.example .env   # set UPLOAD_API_KEY; needs ffmpeg/ffprobe (PATH or FFMPEG_PATH)
+cp .env.example .env    # set UPLOAD_API_KEY; ffmpeg and ffprobe must be on PATH
 npm start
+npm test
 ```
 
-```bash
-npm test                 # all suites
-node test/upload-test.js path/to/video.mp4              # end-to-end
-node test/upload-test.js path/to/video.mp4 --interrupt  # resume
-```
+`MEDIA_SIGNING_SECRET` starts empty and fails closed, so paid delivery returns
+nothing locally until it is set.
 
-`MEDIA_SIGNING_SECRET` is unset by default and fails closed, so premium
-delivery returns nothing locally until you set it.
+`scripts/` holds the operational tools: `storage-verify.js` (`--fix` re-pushes),
+`storage-backfill.js`, `storage-restore.js`, `grant-upload.js`,
+`scan-score.js`, and a few S5/s3d probes. Each prints its own usage.
 
-## Scripts
+## Deploying
 
-| Script | Purpose |
-|---|---|
-| `storage-verify.js` | Check every published job is still present on its backend (`--fix` re-pushes) |
-| `storage-backfill.js` | Push already-published local files to a backend (`--dry-run` first) |
-| `storage-restore.js` | Pull files back from a backend onto local disk |
-| `grant-upload.js` | Mint a scoped single-upload token for an outside party |
-| `scan-score.js` | Score a local file through the configured scanners, to tune thresholds |
-| `s5-probe-tus.js` | Re-derive the S5 CID constants against a live node |
-| `s5-cid-to-key.js` | Map a CID to its s3d object key |
-| `s3d-verify.js`, `s3d-presign-test.js` | s3d connectivity and presigned-URL behaviour |
+[deploy/SETUP.md](deploy/SETUP.md) is the VPS runbook: nginx, systemd, certbot,
+DNS, and the `tus-js-client` snippet for the frontend.
+[deploy/s5/README.md](deploy/s5/README.md) covers the S5 node and the s3d
+daemon that puts bytes on Sia, including where the S5 spec is wrong and why s3d
+holds files back until a batch fills.
 
-## Deploy
-
-- [deploy/SETUP.md](deploy/SETUP.md) -- VPS runbook (nginx, systemd, certbot,
-  Cloudflare DNS) plus the frontend `tus-js-client` integration snippet.
-- [deploy/s5/README.md](deploy/s5/README.md) -- the S5 node and s3d containers
-  that back public media, including where the S5 spec is wrong and why s3d
-  holds bytes back until a batch fills.
-- [VERIFY.md](VERIFY.md) -- procedure for an outside party to verify the
-  decentralised storage claims without any credentials.
+One thing to know before wiring up a frontend: CDNs cap request bodies, and
+Cloudflare's cap is 100MB. That is why uploads go in 50MB tus chunks. Large
+files still work because tus makes many small PATCH requests instead of one
+big one.
