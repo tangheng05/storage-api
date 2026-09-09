@@ -1,4 +1,5 @@
 const fsp = require('fs/promises');
+const path = require('path');
 const sharp = require('sharp');
 
 const config = require('../config');
@@ -339,6 +340,81 @@ const RUNNERS = {
   phash: runPhash, http: runHttp, vision: runVision, gemini: runGemini,
 };
 
+/*
+| Verdict cache, keyed by the perceptual hash we already compute.
+|
+| The classifier is not deterministic. The same file has come back 0.45 and
+| 0.85 on consecutive uploads, either side of the threshold -- so without this,
+| pressing upload again is a re-roll: a refused image gets through on the third
+| try, and a clean one fails for no reason the uploader can see. Remembering
+| what we decided the first time is what makes the gate a decision rather than
+| a dice throw.
+|
+| Read through a mtime check like the blocklist, so an operator editing the file
+| takes effect without a restart. Only whole-image verdicts land here; a
+| blocklist hit short-circuits before the lookup and needs no caching.
+*/
+let verdictCache = { mtimeMs: -1, entries: {} };
+
+async function loadVerdictCache() {
+  if (!config.SCAN_CACHE_ENABLED) return {};
+  try {
+    const stat = await fsp.stat(config.SCAN_CACHE_PATH);
+    if (stat.mtimeMs === verdictCache.mtimeMs) return verdictCache.entries;
+    const entries = JSON.parse(await fsp.readFile(config.SCAN_CACHE_PATH, 'utf8'));
+    verdictCache = { mtimeMs: stat.mtimeMs, entries };
+    return entries;
+  } catch {
+    // Absent or corrupt is a normal cold start, not a scanner failure.
+    verdictCache = { mtimeMs: -1, entries: {} };
+    return verdictCache.entries;
+  }
+}
+
+async function readCachedVerdict(phash) {
+  if (!config.SCAN_CACHE_ENABLED || !phash) return null;
+  const entries = await loadVerdictCache();
+  const hit = entries[phash];
+  if (!hit) return null;
+  // Expiry bounds a wrong answer in both directions. With no review queue there
+  // is nothing to appeal to, so a bad roll must not be permanent.
+  if ((Date.now() - hit.at) / 1000 > config.SCAN_CACHE_TTL_SEC) return null;
+  return hit;
+}
+
+async function writeCachedVerdict(phash, result) {
+  if (!config.SCAN_CACHE_ENABLED || !phash) return;
+  try {
+    const entries = { ...(await loadVerdictCache()) };
+    entries[phash] = {
+      verdict: result.verdict,
+      score: result.score,
+      labels: result.labels || [],
+      provider: result.provider,
+      at: Date.now(),
+    };
+
+    // Drop expired first, then the oldest, so the file cannot grow without end.
+    const cutoff = Date.now() - config.SCAN_CACHE_TTL_SEC * 1000;
+    let kept = Object.entries(entries).filter(([, v]) => v.at >= cutoff);
+    if (kept.length > config.SCAN_CACHE_MAX) {
+      kept = kept.sort((a, b) => b[1].at - a[1].at).slice(0, config.SCAN_CACHE_MAX);
+    }
+
+    const next = Object.fromEntries(kept);
+    await fsp.mkdir(path.dirname(config.SCAN_CACHE_PATH), { recursive: true });
+    // Write then rename: a torn file would be read as a cold cache on the next
+    // upload, silently putting the dice back.
+    const tmp = `${config.SCAN_CACHE_PATH}.tmp`;
+    await fsp.writeFile(tmp, JSON.stringify(next));
+    await fsp.rename(tmp, config.SCAN_CACHE_PATH);
+    verdictCache = { mtimeMs: -1, entries: next };
+  } catch (err) {
+    // A cache that cannot be written must not fail an upload.
+    logger.warn({ err: err.message }, 'could not write scan verdict cache');
+  }
+}
+
 // Throws only when a provider is broken; what that means is policy
 // (SCAN_FAIL_OPEN), decided by the caller.
 async function scanFile({ filePath, mediaType, immutable = false }) {
@@ -355,6 +431,25 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     results.push({ ...result, verdict });
     // The remaining providers cost money and cannot change the outcome.
     if (verdict === VERDICT.REJECT) break;
+
+    // A local hash is known once phash has run. If this exact image has been
+    // judged before, reuse that answer instead of paying a classifier to roll
+    // the dice again -- which is what let a refused upload through on a retry.
+    if (result.phash) {
+      // eslint-disable-next-line no-await-in-loop
+      const cached = await readCachedVerdict(result.phash);
+      if (cached) {
+        return {
+          verdict: cached.verdict,
+          score: cached.score,
+          labels: cached.labels || [],
+          provider: cached.provider,
+          providers: [...results.map((r) => r.provider), 'cache'],
+          phash: result.phash,
+          matched: null,
+        };
+      }
+    }
   }
 
   // Highest verdict wins; among equals the highest score, so a clean pass still
@@ -366,7 +461,7 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     return (r.score ?? -1) > (acc.score ?? -1) ? r : acc;
   }, null) || { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'none' };
 
-  return {
+  const decided = {
     verdict: worst.verdict,
     score: worst.score,
     labels: worst.labels || [],
@@ -381,6 +476,12 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     phash: (results.find((r) => r.phash) || {}).phash || null,
     matched: (results.find((r) => r.matched) || {}).matched || null,
   };
+
+  // Blocklist hits are already deterministic and are recorded elsewhere; there
+  // is nothing to remember and caching them would just duplicate that list.
+  if (!decided.matched) await writeCachedVerdict(decided.phash, decided);
+
+  return decided;
 }
 
 /*

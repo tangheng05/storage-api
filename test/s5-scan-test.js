@@ -55,6 +55,7 @@ process.env.S5_TYPES = 'image,video';
 process.env.SCAN_ENABLED = 'true';
 process.env.SCAN_PROVIDERS = 'phash';
 process.env.SCAN_BLOCKLIST_PATH = path.join(root, 'blocklist.txt');
+process.env.SCAN_CACHE_PATH = path.join(root, 'scan-cache.json');
 // s3d stays off: this test is about the S5 path and the gate.
 process.env.SIA_ENABLED = 'false';
 
@@ -572,6 +573,44 @@ async function main() {
 
   global.fetch = keepFetch2;
   cfg2.SCAN_PROVIDERS = keepProv;
+
+  /*
+  | The classifier does not give the same answer twice. In production the same
+  | file scored 0.45 and 0.85 on consecutive uploads -- either side of the
+  | threshold -- which made pressing upload again a re-roll: a refused image got
+  | through on a later try, and a clean one failed for no visible reason. The
+  | verdict cache takes the dice away, so this drives a deliberately
+  | flip-flopping classifier and checks the second answer matches the first.
+  */
+  const cfg3 = require('../src/config');
+  const keepProv3 = cfg3.SCAN_PROVIDERS;
+  const keepUrl3 = cfg3.SCAN_HTTP_URL;
+  const keepFetch3 = global.fetch;
+  cfg3.SCAN_PROVIDERS = ['phash', 'http'];
+  cfg3.SCAN_HTTP_URL = `http://127.0.0.1:${PORT}/never`;
+
+  const swing = [0.85, 0.2];
+  let rolls = 0;
+  global.fetch = async () => ({
+    ok: true,
+    // eslint-disable-next-line no-plusplus
+    json: async () => ({ score: swing[rolls++] ?? 0.2 }),
+  });
+
+  const flaky = path.join(root, 'flaky.webp');
+  await makeImage(flaky, 21);
+  const firstScan = await scan.scanFile({ filePath: flaky, mediaType: 'image', immutable: true });
+  const retryScan = await scan.scanFile({ filePath: flaky, mediaType: 'image', immutable: true });
+
+  global.fetch = keepFetch3;
+  cfg3.SCAN_PROVIDERS = keepProv3;
+  cfg3.SCAN_HTTP_URL = keepUrl3;
+
+  ok('a high roll is refused', firstScan.verdict === 'reject');
+  ok('the retry gets the same verdict, not a second roll', retryScan.verdict === 'reject');
+  ok('and it came from the cache', retryScan.providers.includes('cache'));
+  ok('so the classifier was paid for once, not twice', rolls === 1);
+  ok('the remembered score is the one that decided it', retryScan.score === 0.85);
 
   srv.close();
 

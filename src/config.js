@@ -179,6 +179,24 @@ module.exports = {
   SCAN_TIMEOUT_MS: num(process.env.SCAN_TIMEOUT_MS, 30000),
   // Hashes of content already taken down, one per line. Catches re-uploads.
   SCAN_BLOCKLIST_PATH: path.resolve(process.env.SCAN_BLOCKLIST_PATH || './data/blocklist.txt'),
+  /*
+  | Verdict cache, keyed by perceptual hash.
+  |
+  | The classifier is not deterministic: the same file has scored 0.45 and 0.85
+  | on consecutive uploads, either side of the threshold. Without a cache that
+  | makes a retry a re-roll -- a refused user simply uploads again until they
+  | get a low score, and a legitimate image fails once and passes the next time.
+  | Remembering the first verdict for a given image makes the answer stable and
+  | takes the dice away.
+  |
+  | The TTL bounds a wrong answer in either direction, which matters because
+  | there is no review queue to appeal to.
+  */
+  SCAN_CACHE_ENABLED: process.env.SCAN_CACHE_ENABLED !== 'false',
+  SCAN_CACHE_PATH: path.resolve(process.env.SCAN_CACHE_PATH || './data/scan-cache.json'),
+  SCAN_CACHE_TTL_SEC: num(process.env.SCAN_CACHE_TTL_SEC, 24 * 60 * 60),
+  // Oldest entries are dropped past this. Each is well under 200 bytes.
+  SCAN_CACHE_MAX: num(process.env.SCAN_CACHE_MAX, 5000),
   // 0 is exact; 5 tolerates a re-encode or a light crop.
   SCAN_PHASH_DISTANCE: num(process.env.SCAN_PHASH_DISTANCE, 5),
   SCAN_HTTP_URL: process.env.SCAN_HTTP_URL || '',
