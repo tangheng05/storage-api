@@ -453,6 +453,33 @@ async function main() {
   ok('and the uploader is given that reason',
     (scan.publicReasons(noThumb) || []).includes('no_thumbnail'));
 
+  // A paywalled video's poster frame is paywalled content. Routing the thumb as
+  // 'public' put it on S5, which cannot be undone -- so a premium video leaked a
+  // permanent frame of itself. Both slots must stay off S5 when private.
+  const ULID_PREM = '01J0000000000000000000000P';
+  await fsp.writeFile(path.join(root, dirs.PENDING_VIDEOS_DIR, `${ULID_PREM}.mp4`), Buffer.alloc(64, 2));
+  await makeImage(path.join(root, dirs.PENDING_THUMBS_DIR, `${ULID_PREM}.jpg`), 5);
+  await jobs.create(ULID_PREM, {
+    state: 'scanning',
+    media_type: 'video',
+    visibility: 'private',
+    pending_file: `${ULID_PREM}.mp4`,
+    pending_thumb: `${ULID_PREM}.jpg`,
+  });
+  await processor.finalize(ULID_PREM);
+  const premium = await jobs.get(ULID_PREM);
+  ok('a premium video publishes', premium.state === 'ready');
+  ok('the video itself never reaches S5', !premium.s5_cid);
+  ok('and neither does its thumbnail', !premium.s5_thumb_cid);
+  ok('the video is served through the signed /media/ path',
+    (premium.url || '').includes('/media/videos/'));
+  ok('the thumbnail is served from local disk',
+    (premium.thumbnail_url || '').includes('/thumbnails/'));
+  ok('the thumbnail URL is not a CDN one',
+    !(premium.thumbnail_url || '').includes('/cdn/'));
+  ok('the bytes landed in the private dir',
+    fs.existsSync(path.join(root, dirs.PRIVATE_VIDEOS_DIR, `${ULID_PREM}.mp4`)));
+
   // --- vision likelihood mapping ---
   // SafeSearch answers in words; only VERY_LIKELY should ever auto-reject.
   const cfg2 = require('../src/config');

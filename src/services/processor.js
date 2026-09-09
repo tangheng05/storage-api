@@ -258,17 +258,23 @@ async function publishCleared(id, job) {
   let thumbnailUrl;
   let thumbPatch = {};
   if (thumbPath) {
+    // The job's own visibility, not 'public'. A paywalled video's poster frame
+    // is still paywalled content, and routing it as public put it on S5 -- a
+    // permanent, unrevokable copy of a frame from a paid video.
     const thumb = await mirror.publish({
       id,
       kind: 'thumbnails',
       mediaType: job.media_type,
       file: job.pending_thumb,
       filePath: thumbPath,
-      visibility: 'public',
+      visibility,
       slot: 'thumb',
     });
     thumbPatch = thumb.patch;
-    thumbnailUrl = thumb.url || `${config.PUBLIC_BASE_URL}/thumbnails/${job.pending_thumb}`;
+    // Thumbnails stay served from local disk for private jobs so the card has
+    // a poster (see routes/cdn.js), but the bytes never leave this machine.
+    const remote = visibility === 'private' ? null : thumb.url;
+    thumbnailUrl = remote || `${config.PUBLIC_BASE_URL}/thumbnails/${job.pending_thumb}`;
   }
 
   // Private media always goes through the signed /media/ path: the signature
