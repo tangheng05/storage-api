@@ -525,7 +525,41 @@ async function main() {
   ok('a deferred job is still judged at S5 thresholds',
     mirror.isImmutable({ mediaType: 'image', visibility: 'public' }) === true);
 
+  // The decision is the uploader's, not the deployment's. A surface with no
+  // publish step (an AI site builder that saves as it goes) must publish
+  // immediately -- left deferred, nothing would ever call /promote and the file
+  // would sit on one disk forever.
+  ok('an upload that opts out publishes immediately, even with the flag on',
+    mirror.deferred({ mediaType: 'image', visibility: 'public', defer: false }) === false);
+  ok('an upload that opts in defers', 
+    mirror.deferred({ mediaType: 'image', visibility: 'public', defer: true }) === true);
+  ok('no opinion falls back to the deployment default',
+    mirror.deferred({ mediaType: 'image', visibility: 'public' }) === true);
+
+  const ULID_D5 = '01J0000000000000000000000R';
+  await makeImage(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_D5}.webp`), 13);
+  await jobs.create(ULID_D5, {
+    state: 'scanning',
+    media_type: 'image',
+    visibility: 'public',
+    defer_publish: false,
+    pending_file: `${ULID_D5}.webp`,
+    pending_thumb: null,
+  });
+  await processor.finalize(ULID_D5);
+  const optedOut = await jobs.get(ULID_D5);
+  ok('an opted-out upload reaches S5 without /promote', !!optedOut.s5_cid);
+  ok('and its slot is published, not deferred', optedOut.mirror_state === 'published');
+
   cfgP.S5_PROMOTE_ON_PUBLISH = false;
+
+  // With the flag off, an upload can still ask to wait.
+  ok('a per-upload opt-in works with the flag off',
+    mirror.deferred({ mediaType: 'image', visibility: 'public', defer: true }) === true);
+  ok('and the default stays publish-immediately',
+    mirror.deferred({ mediaType: 'image', visibility: 'public' }) === false);
+  ok('premium never defers, whatever is asked',
+    mirror.deferred({ mediaType: 'image', visibility: 'private', defer: true }) === false);
 
   // --- video ---
   // A video whose thumbnail failed to generate must be held for a person, not

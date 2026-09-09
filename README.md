@@ -33,10 +33,17 @@ withdrawn, a public file can never become paid — the visibility route returns
 409 once it is on S5. Declare `visibility: 'private'` in `Upload-Metadata` at
 create time instead.
 
-With `S5_PROMOTE_ON_PUBLISH=true` a cleared upload stays on local disk and
-reaches S5 only when `/promote` is called. The URL is the `/cdn` one from the
-start, so an editor can embed it in a draft and promoting on publish changes
-nothing. Without it, an abandoned draft is on S5 permanently.
+An upload sending `defer_publish` in its tus metadata stays on local disk after
+the scan and reaches S5 only when `/promote` is called. The URL is the `/cdn`
+one from the start, so an editor can embed it in a draft and promoting on
+publish rewrites nothing. Use it on surfaces that have a draft step; without
+it, an abandoned draft is on S5 permanently and cannot be withdrawn.
+
+Only the uploading surface knows whether a publish step is coming, which is why
+this is per-upload rather than a deployment setting. A surface that saves as it
+goes must not defer: nothing would ever call `/promote` and its files would
+never reach Sia. `S5_PROMOTE_ON_PUBLISH` sets the default for uploads that say
+nothing, and should stay off for that reason.
 
 ## Auth
 

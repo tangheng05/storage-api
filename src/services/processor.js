@@ -253,6 +253,7 @@ async function publishCleared(id, job) {
 
   const published = await mirror.publish({
     id, kind, mediaType: job.media_type, file, filePath: finalPath, visibility, slot: 'main',
+    defer: job.defer_publish,
   });
 
   let thumbnailUrl;
@@ -269,6 +270,7 @@ async function publishCleared(id, job) {
       filePath: thumbPath,
       visibility,
       slot: 'thumb',
+      defer: job.defer_publish,
     });
     thumbPatch = thumb.patch;
     // Thumbnails stay served from local disk for private jobs so the card has

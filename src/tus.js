@@ -53,6 +53,8 @@ const ALLOWED_IMAGE_EXT = [
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff', '.avif', '.heic', '.heif',
 ];
 
+const DEFER_VALUES = new Set(['true', '1', 'yes']);
+
 const STATUS_PATHS = { video: 'videos', audio: 'audio', image: 'images' };
 
 const tusServer = new Server({
@@ -128,6 +130,12 @@ const tusServer = new Server({
       // revoked, so it can never become premium later (media.js refuses
       // that flip).
       visibility: meta.visibility === 'private' ? 'private' : 'public',
+      // Set by surfaces with a draft step (a blog editor), so an abandoned
+      // draft never reaches S5. Absent means S5_PROMOTE_ON_PUBLISH decides --
+      // a surface with no publish step must not inherit a wait nobody ends.
+      defer_publish: DEFER_VALUES.has(String(meta.defer_publish || '').toLowerCase())
+        ? true
+        : undefined,
     });
     res.setHeader('X-Upload-Token', uploadToken);
     return res;
