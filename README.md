@@ -63,7 +63,7 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | DELETE | `/{videos,images,audio}/:id` | file, thumbnail, backend copy |
 | GET | `/media/:kind/:file` | paid delivery, signed URL required |
 | POST | `/media/:kind/:file/visibility` | flip public/private; 409 once on S5 |
-| POST | `/media/:kind/:file/promote` | publish to S5 now; idempotent |
+| POST | `/media/:kind/:file/promote` | queue the S5 push (202); idempotent |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
 | GET | `/blob/1/:name` | S5 blob store, read-only, for S5 peers |
 | POST | `/moderation/blocklist` | blocklist a hash by `phash` or job id |

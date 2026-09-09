@@ -9,6 +9,7 @@ const { requireUploadKey } = require('../middleware/auth');
 const { verify } = require('../utils/signed_url');
 const sia = require('../services/sia');
 const mirror = require('../services/mirror');
+const queue = require('../services/queue');
 const { exists } = require('../utils/fs');
 
 const router = express.Router();
@@ -234,50 +235,34 @@ router.post('/:kind/:file/promote', requireUploadKey, async (req, res) => {
     return res.status(409).json({ error: 'local_file_missing' });
   }
 
-  const patch = {};
-  const main = await mirror.publish({
-    id, kind, mediaType, file, filePath, visibility: 'public', slot: 'main', force: true,
-  });
-  Object.assign(patch, main.patch);
-
-  // Video only, and only if the frame was generated at conversion time.
+  /*
+  | Accepted, not done. The push uploads the whole file to the backend, which
+  | for a video is minutes -- holding the request open would stall the caller's
+  | publish and time it out long before the upload finished, then report a
+  | failure for something that went on to succeed.
+  |
+  | 'pending' is what makes that safe: the boot sweep re-runs any slot left in
+  | it, so a restart mid-upload does not lose the promotion.
+  */
+  const marks = { [mirror.SLOTS.main.state]: 'pending' };
   const thumbFile = `${id}.jpg`;
-  const thumbPath = path.join(config.THUMBS_DIR, thumbFile);
-  if (mediaType === 'video' && await exists(thumbPath)) {
-    const thumb = await mirror.publish({
-      id,
-      kind: 'thumbnails',
-      mediaType,
-      file: thumbFile,
-      filePath: thumbPath,
-      visibility: 'public',
-      slot: 'thumb',
-      force: true,
-    });
-    Object.assign(patch, thumb.patch);
-  }
+  const hasThumb = mediaType === 'video' && await exists(path.join(config.THUMBS_DIR, thumbFile));
+  if (hasThumb) marks[mirror.SLOTS.thumb.state] = 'pending';
 
   try {
-    await jobs.update(id, patch);
+    await jobs.update(id, marks);
   } catch (err) {
-    // The bytes are on S5 but the record did not take the CID, so the boot
-    // sweep cannot find them. Say so rather than report success.
-    logger.error({ id, kind, err: err.message }, 'promoted but the job record did not update');
-    return res.status(500).json({ error: 'promoted_but_not_recorded' });
+    logger.error({ id, kind, err: err.message }, 'could not mark job for promotion');
+    return res.status(500).json({ error: 'could_not_queue_promotion' });
   }
 
-  const failed = patch[mirror.SLOTS.main.state] !== 'published';
-  if (failed) {
-    logger.warn({ id, kind, error: patch[mirror.SLOTS.main.error] }, 'promote to s5 failed');
-    return res.status(502).json({
-      error: 'promote_failed',
-      message: patch[mirror.SLOTS.main.error] || 'backend refused the push',
-      url: job.url,
-    });
-  }
+  queue.push(
+    () => mirror.retry(id, { force: true, states: ['pending'] }),
+    queue.PUBLISH_LANE,
+  );
 
-  logger.info({ id, kind, cid: patch[mirror.SLOTS.main.cid] }, 'promoted to s5');
-  return res.json({ id, promoted: true, url: main.url || job.url });
+  logger.info({ id, kind, thumb: hasThumb }, 'promotion queued');
+  return res.status(202).json({ id, promoted: true, queued: true, url: job.url });
 });
 
 // No membership logic by design: the main API decides who is entitled and proves

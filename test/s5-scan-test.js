@@ -303,6 +303,19 @@ async function main() {
     !fs.existsSync(path.join(root, dirs.IMAGES_DIR, `${ULID_C}.webp`)));
   ok('a refused upload has no CID', !midBand.s5_cid);
 
+  // Promotion is queued, so assertions about its result have to wait for the
+  // in-process lane to drain.
+  const waitFor = async (probe, tries = 100) => {
+    for (let i = 0; i < tries; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const got = await probe();
+      if (got) return got;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('timed out waiting for the publish lane');
+  };
+
   // --- paywall boundaries, over HTTP ---
   const app = require('../src/app');
   const srv = await new Promise((r) => {
@@ -471,13 +484,19 @@ async function main() {
   ok('and /cdn serves it from local disk',
     (await call('GET', `/cdn/images/${ULID_D1}.webp`)).status === 200);
 
+  // 202, not 200: the backend push can take minutes for a video, so holding the
+  // request open would time the caller out before it finished.
   const promoted = await call('POST', `/media/images/${ULID_D1}.webp/promote`);
-  const afterPromote = await jobs.get(ULID_D1);
-  ok('promote succeeds', promoted.status === 200);
-  ok('it mints a CID', !!afterPromote.s5_cid);
-  ok('the slot is now published', afterPromote.mirror_state === 'published');
-  ok('and the URL did not change', afterPromote.url === draftUrl);
-  ok('the response reports the same URL', JSON.parse(promoted.text).url === draftUrl);
+  ok('promote is accepted immediately', promoted.status === 202);
+  ok('and reports the same URL', JSON.parse(promoted.text).url === draftUrl);
+
+  const settled = await waitFor(async () => {
+    const j = await jobs.get(ULID_D1);
+    return j.mirror_state !== 'pending' ? j : null;
+  });
+  ok('the queued push mints a CID', !!settled.s5_cid);
+  ok('the slot ends published', settled.mirror_state === 'published');
+  ok('and the URL still did not change', settled.url === draftUrl);
   ok('/cdn still serves it, now from S5',
     (await call('GET', `/cdn/images/${ULID_D1}.webp`)).status === 200);
 
@@ -550,6 +569,24 @@ async function main() {
   const optedOut = await jobs.get(ULID_D5);
   ok('an opted-out upload reaches S5 without /promote', !!optedOut.s5_cid);
   ok('and its slot is published, not deferred', optedOut.mirror_state === 'published');
+
+  // retry() had the same hardcoded 'public' for the thumb slot that finalize
+  // did, so recovering a premium video would have put its poster on S5.
+  const ULID_D6 = '01J0000000000000000000000S';
+  await makeImage(path.join(root, dirs.PRIVATE_VIDEOS_DIR, `${ULID_D6}.mp4`), 14);
+  await makeImage(path.join(root, dirs.THUMBS_DIR, `${ULID_D6}.jpg`), 15);
+  await jobs.create(ULID_D6, {
+    state: 'ready',
+    media_type: 'video',
+    visibility: 'private',
+    url: `${cfgP.PUBLIC_BASE_URL}/media/videos/${ULID_D6}.mp4`,
+    mirror_state: 'failed',
+    thumb_state: 'failed',
+  });
+  await mirror.retry(ULID_D6, { force: true });
+  const recovered = await jobs.get(ULID_D6);
+  ok('recovering a premium video keeps it off S5', !recovered.s5_cid);
+  ok('and keeps its poster off S5 too', !recovered.s5_thumb_cid);
 
   cfgP.S5_PROMOTE_ON_PUBLISH = false;
 

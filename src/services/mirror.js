@@ -141,15 +141,23 @@ async function publish({
   }
 }
 
-async function retry(id, { force = false } = {}) {
+/*
+| `states` names the slot states to act on; without it, force means "any slot
+| that was ever attempted" (the verify script re-pushing a 'published' slot it
+| found missing) and otherwise only 'failed' is retried.
+|
+| force also bypasses the publish deferral, because a caller reaching here is
+| the event the deferral was waiting for.
+*/
+async function retry(id, { force = false, states = null } = {}) {
   const job = await jobs.get(id);
   if (!job) return;
 
   for (const slot of ['main', 'thumb']) {
     const fields = SLOTS[slot];
-    // force is for the verify script, retrying an already-'published' slot it found wrong.
-    if (!force && job[fields.state] !== 'failed') continue;
-    if (force && !job[fields.state]) continue;
+    const state = job[fields.state];
+    const wanted = states ? states.includes(state) : (force ? !!state : state === 'failed');
+    if (!wanted) continue;
 
     const file = slot === 'thumb' ? `${id}.jpg` : fileFromJob(job);
     if (!file) continue;
@@ -176,8 +184,11 @@ async function retry(id, { force = false } = {}) {
       mediaType: job.media_type,
       file,
       filePath,
-      visibility: slot === 'thumb' ? 'public' : job.visibility || 'public',
+      // The job's own visibility for both slots: a paywalled video's poster
+      // frame is paywalled content, and 'public' here put it on S5 for good.
+      visibility: job.visibility || 'public',
       slot,
+      force,
     });
     // eslint-disable-next-line no-await-in-loop
     await jobs.update(id, patch);
@@ -220,14 +231,19 @@ function recoverOnBoot() {
   // 'orphaned' excluded: its local file is gone, so it would spin every boot.
   const pending = jobs
     .listByState(['ready'])
-    .filter((job) => job.mirror_state === 'failed' || job.thumb_state === 'failed')
+    // 'pending' is a promote that was enqueued but not finished before restart.
+    .filter((job) => ['failed', 'pending'].includes(job.mirror_state)
+      || ['failed', 'pending'].includes(job.thumb_state))
     .slice(0, config.PUBLISH_RECOVER_LIMIT);
 
   if (!pending.length) return;
 
   logger.info({ count: pending.length }, 'requeueing unfinished publishes');
   pending.forEach((job) => {
-    queue.push(() => retry(job.id), queue.PUBLISH_LANE);
+    queue.push(
+      () => retry(job.id, { force: true, states: ['failed', 'pending'] }),
+      queue.PUBLISH_LANE,
+    );
   });
 }
 
