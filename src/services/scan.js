@@ -231,6 +231,16 @@ const GEMINI_MIME = {
   '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
 };
 
+// A number is 2.5's thinkingBudget, a word is Gemini 3's thinkingLevel. The
+// model rejects the other one outright.
+function geminiThinking() {
+  const v = config.SCAN_GEMINI_THINKING;
+  if (!v) return {};
+  return Number.isFinite(Number(v))
+    ? { thinkingConfig: { thinkingBudget: Number(v) } }
+    : { thinkingConfig: { thinkingLevel: v.toUpperCase() } };
+}
+
 async function runGemini(filePath) {
   if (!config.SCAN_GEMINI_API_KEY) throw new Error('scan_gemini_api_key_not_set');
   const buf = await fsp.readFile(filePath);
@@ -252,9 +262,7 @@ async function runGemini(filePath) {
           responseMimeType: 'application/json',
           responseSchema: GEMINI_SCHEMA,
           temperature: 0,
-          ...(config.SCAN_GEMINI_THINKING_BUDGET >= 0
-            ? { thinkingConfig: { thinkingBudget: config.SCAN_GEMINI_THINKING_BUDGET } }
-            : {}),
+          ...geminiThinking(),
         },
         safetySettings: HARM_CATEGORY_ALL.map((category) => ({ category, threshold: 'BLOCK_NONE' })),
       }),

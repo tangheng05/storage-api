@@ -681,8 +681,9 @@ async function main() {
   cfg2.SCAN_PROVIDERS = ['gemini'];
   cfg2.SCAN_GEMINI_API_KEY = 'test-key';
 
-  // 2.5 models think by default, which took ~30s on a call returning three
-  // integers -- the whole reason an upload felt slow.
+  // Gemini 3 takes thinkingLevel, 2.5 takes thinkingBudget, and sending the
+  // wrong one is a 400 that holds the upload fail-closed. Pinned because that
+  // reached production once.
   let sentBody = null;
   global.fetch = async (url, init) => {
     sentBody = JSON.parse(init.body);
@@ -696,18 +697,27 @@ async function main() {
       }),
     };
   };
+
+  const thinkingSentFor = async (value) => {
+    cfg2.SCAN_GEMINI_THINKING = value;
+    sentBody = null;
+    await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+    return sentBody.generationConfig.thinkingConfig;
+  };
+
+  ok('empty omits thinkingConfig, so the model decides',
+    (await thinkingSentFor('')) === undefined);
+  ok('a word is sent as Gemini 3 thinkingLevel',
+    (await thinkingSentFor('minimal')).thinkingLevel === 'MINIMAL');
+  ok('a number is sent as a 2.5 thinkingBudget',
+    (await thinkingSentFor('0')).thinkingBudget === 0);
+  ok('and the two are never sent together',
+    Object.keys((await thinkingSentFor('LOW'))).length === 1);
+
+  cfg2.SCAN_GEMINI_THINKING = '';
   await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
-  ok('thinking is switched off for the classifier',
-    sentBody.generationConfig.thinkingConfig.thinkingBudget === 0);
   ok('the schema still pins integers', !!sentBody.generationConfig.responseSchema);
   ok('and temperature stays at 0', sentBody.generationConfig.temperature === 0);
-
-  cfg2.SCAN_GEMINI_THINKING_BUDGET = -1;
-  sentBody = null;
-  await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
-  ok('-1 omits the field for models that reject it',
-    sentBody.generationConfig.thinkingConfig === undefined);
-  cfg2.SCAN_GEMINI_THINKING_BUDGET = 0;
 
   const classified = (rating, extra = {}) => {
     global.fetch = async () => ({
