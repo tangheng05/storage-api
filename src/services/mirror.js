@@ -53,9 +53,7 @@ function deferred({ mediaType, visibility = 'public' }) {
 }
 
 // Picks the scanner's thresholds. Only ever true for S5.
-function isImmutable({ mediaType, visibility = 'public' }) {
-  return backendFor({ mediaType, visibility }) === 's5';
-}
+const isImmutable = targetsS5;
 
 // Null unless S5_EXPOSE_CID: a CID handed to a client can be fetched from any
 // S5 node forever with no route back, so exposing it can't be undone later.

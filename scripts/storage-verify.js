@@ -87,8 +87,13 @@ async function main() {
   }
 
   console.log(`checked ${tracked.length} tracked object(s): ${ok} ok, ${problems.length} problem(s)`);
-  if (untracked.length) {
-    console.log(`${untracked.length} ready job(s) are on no backend (failed, or predate it — run storage-backfill.js)`);
+  const deferredJobs = untracked.filter((job) => job.mirror_state === 'deferred');
+  const gaps = untracked.length - deferredJobs.length;
+  if (deferredJobs.length) {
+    console.log(`${deferredJobs.length} job(s) awaiting /promote — not a gap, leave them alone`);
+  }
+  if (gaps) {
+    console.log(`${gaps} ready job(s) are on no backend (failed, or predate it — run storage-backfill.js)`);
   }
   problems.forEach((p) => console.log(`  ${p.id}  ${p.key}  ${p.issue}`));
 

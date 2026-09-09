@@ -5,6 +5,7 @@ const config = require('../config');
 const jobs = require('../services/jobs');
 const s5 = require('../services/s5');
 const logger = require('../services/logger');
+const fsp = require('fs/promises');
 const { exists } = require('../utils/fs');
 
 const router = express.Router();
@@ -81,6 +82,8 @@ router.all('/:kind/:file', async (req, res) => {
       res.set('Content-Type', CONTENT_TYPES[path.extname(req.params.file).toLowerCase()]
         || 'application/octet-stream');
       res.set('Accept-Ranges', 'bytes');
+      const size = await fsp.stat(localPath).then((st) => st.size).catch(() => null);
+      if (size !== null) res.set('Content-Length', String(size));
       return res.end();
     }
     return res.sendFile(localPath);

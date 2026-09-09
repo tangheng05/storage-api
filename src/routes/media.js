@@ -195,7 +195,6 @@ router.post('/:kind/:file/promote', requireUploadKey, async (req, res) => {
   if (!parsed) return res.status(400).json({ error: 'Invalid media reference' });
 
   const { id, file } = parsed;
-  const { kind } = req.params;
 
   let job;
   try {
@@ -219,6 +218,13 @@ router.post('/:kind/:file/promote', requireUploadKey, async (req, res) => {
   }
 
   const mediaType = job.media_type;
+  // From the job, never the URL: a mismatched kind still locates the file (the
+  // dir comes from media_type) and would then mint a CID under the wrong path.
+  const kind = mirror.kindFor(mediaType);
+  if (kind !== req.params.kind) {
+    return res.status(400).json({ error: 'kind_does_not_match_media', expected: kind });
+  }
+
   if (!mirror.targetsS5({ mediaType, visibility: 'public' })) {
     return res.json({ id, promoted: false, reason: 's5_not_enabled_for_type', url: job.url });
   }

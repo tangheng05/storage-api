@@ -7,6 +7,10 @@
 |
 |   node scripts/storage-backfill.js --dry-run
 |   node scripts/storage-backfill.js --type video --limit 50
+|
+| Slots left 'deferred' by S5_PROMOTE_ON_PUBLISH are skipped: they are waiting
+| for /promote, and pushing them here would put every abandoned draft on S5
+| permanently. --include-deferred overrides that, deliberately.
 */
 const fsp = require('fs/promises');
 const path = require('path');
@@ -23,6 +27,7 @@ const flag = (name, fallback) => {
   const i = args.indexOf(name);
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 };
+const INCLUDE_DEFERRED = args.includes('--include-deferred');
 const ONLY_TYPE = flag('--type', null);
 const LIMIT = parseInt(flag('--limit', '0'), 10) || Infinity;
 
@@ -35,6 +40,9 @@ async function main() {
   const candidates = jobs
     .listByState(['ready'])
     .filter((job) => !job.s5_cid && !job.sia_key)
+    // Awaiting /promote, not a gap. Pushing these is the permanent publish the
+    // deferral exists to avoid.
+    .filter((job) => INCLUDE_DEFERRED || job.mirror_state !== 'deferred')
     .filter((job) => !ONLY_TYPE || job.media_type === ONLY_TYPE)
     // A type that is still unlisted is a deliberate exclusion, not a gap.
     .filter((job) => mirror.backendFor({

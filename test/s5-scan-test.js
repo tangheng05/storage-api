@@ -502,6 +502,22 @@ async function main() {
   const prem = await call('POST', `/media/images/${ULID_D3}.webp/promote`);
   ok('promoting premium media is refused', prem.status === 409);
 
+  // A mismatched kind still finds the file, because the directory comes from
+  // media_type -- so without this check it would mint a CID under /videos/ for
+  // an image and persist the wrong s3d key.
+  const ULID_D4 = '01J0000000000000000000000Q';
+  await makeImage(path.join(root, dirs.IMAGES_DIR, `${ULID_D4}.webp`), 12);
+  await jobs.create(ULID_D4, {
+    state: 'ready',
+    media_type: 'image',
+    visibility: 'public',
+    url: `${cfgP.MEDIA_CDN_BASE_URL}/images/${ULID_D4}.webp`,
+  });
+  const wrongKind = await call('POST', `/media/videos/${ULID_D4}.webp/promote`);
+  const untouched = await jobs.get(ULID_D4);
+  ok('promoting under the wrong kind is refused', wrongKind.status === 400);
+  ok('and nothing was published under it', !untouched.s5_cid);
+
   ok('promote needs the upload key',
     (await callNoKey('POST', `/media/images/${ULID_D1}.webp/promote`)).status === 401);
 
