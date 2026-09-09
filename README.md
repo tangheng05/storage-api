@@ -99,6 +99,10 @@ otherwise a refusal could be retried until it drew a low score. Thresholds are
 stricter for S5. A broken scanner fails closed and the file waits in
 `scanning`.
 
+`SCAN_CONCURRENCY` (default 4) is how many scans run at once. That lane waits
+on the network, so 1 would queue every uploader behind every other one; the
+ffmpeg and sharp lanes stay serial because they are CPU-bound.
+
 **Not a CSAM solution** — that needs hash matching against a known database and
 brings its own reporting obligations.
 

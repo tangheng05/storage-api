@@ -341,8 +341,9 @@ async function writeCachedVerdict(phash, result) {
 
     const next = Object.fromEntries(kept);
     await fsp.mkdir(path.dirname(config.SCAN_CACHE_PATH), { recursive: true });
-    // Write then rename: a torn file would be read as a cold cache on the next upload.
-    const tmp = `${config.SCAN_CACHE_PATH}.tmp`;
+    // Per-write temp name: a shared one lets a second writer truncate it
+    // mid-write and the rename then publishes a torn file.
+    const tmp = `${config.SCAN_CACHE_PATH}.${process.pid}.${Date.now()}.tmp`;
     await fsp.writeFile(tmp, JSON.stringify(next));
     await fsp.rename(tmp, config.SCAN_CACHE_PATH);
     verdictCache = { mtimeMs: -1, entries: next };

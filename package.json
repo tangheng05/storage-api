@@ -7,10 +7,11 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js",
+    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js",
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
-    "test:blob": "node test/s5-blob-test.js"
+    "test:blob": "node test/s5-blob-test.js",
+    "test:queue": "node test/queue-test.js"
   },
   "repository": {
     "type": "git",

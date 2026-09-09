@@ -163,6 +163,9 @@ module.exports = {
   // Stricter for S5, because that publish cannot be undone.
   SCAN_REJECT_SCORE_IMMUTABLE: num(process.env.SCAN_REJECT_SCORE_IMMUTABLE, 0.5),
   SCAN_FAIL_OPEN: process.env.SCAN_FAIL_OPEN === 'true',
+  // Network-bound, so serialising it queues uploaders behind each other. A 429
+  // from raising this is retried with backoff.
+  SCAN_CONCURRENCY: num(process.env.SCAN_CONCURRENCY, 4),
   SCAN_RECOVER_LIMIT: num(process.env.SCAN_RECOVER_LIMIT, 200),
 
   FFMPEG_PATH: process.env.FFMPEG_PATH || 'ffmpeg',
