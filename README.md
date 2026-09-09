@@ -33,6 +33,11 @@ withdrawn, a public file can never become paid — the visibility route returns
 409 once it is on S5. Declare `visibility: 'private'` in `Upload-Metadata` at
 create time instead.
 
+With `S5_PROMOTE_ON_PUBLISH=true` a cleared upload stays on local disk and
+reaches S5 only when `/promote` is called. The URL is the `/cdn` one from the
+start, so an editor can embed it in a draft and promoting on publish changes
+nothing. Without it, an abandoned draft is on S5 permanently.
+
 ## Auth
 
 `x-upload-key: <UPLOAD_API_KEY>` on every upload, status and delete.
@@ -51,6 +56,7 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | DELETE | `/{videos,images,audio}/:id` | file, thumbnail, backend copy |
 | GET | `/media/:kind/:file` | paid delivery, signed URL required |
 | POST | `/media/:kind/:file/visibility` | flip public/private; 409 once on S5 |
+| POST | `/media/:kind/:file/promote` | publish to S5 now; idempotent |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
 | GET | `/blob/1/:name` | S5 blob store, read-only, for S5 peers |
 | POST | `/moderation/blocklist` | blocklist a hash by `phash` or job id |

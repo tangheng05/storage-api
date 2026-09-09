@@ -5,6 +5,7 @@ const config = require('../config');
 const jobs = require('../services/jobs');
 const s5 = require('../services/s5');
 const logger = require('../services/logger');
+const { exists } = require('../utils/fs');
 
 const router = express.Router();
 
@@ -15,6 +16,14 @@ const router = express.Router();
 // redirect target would not have.
 
 const KINDS = ['videos', 'audio', 'images', 'thumbnails'];
+
+// Public dirs only; a private main file is refused before this is consulted.
+const LOCAL_DIRS = {
+  videos: config.VIDEOS_DIR,
+  audio: config.AUDIO_DIR,
+  images: config.IMAGES_DIR,
+  thumbnails: config.THUMBS_DIR,
+};
 
 const CONTENT_TYPES = {
   '.webp': 'image/webp',
@@ -59,9 +68,22 @@ router.all('/:kind/:file', async (req, res) => {
 
   const cid = kind === 'thumbnails' ? job.s5_thumb_cid : job.s5_cid;
   if (!cid) {
-    // s3d or local-only: nginx serves those directly, so this URL was built wrong.
-    logger.warn({ id, kind }, 'cdn resolve for media with no CID');
-    return res.status(404).json({ error: 'Not found' });
+    // Awaiting /promote, or s3d/local-only. Not `immutable`: unlike
+    // content-addressed bytes, this mapping ends when the job is deleted.
+    const dir = LOCAL_DIRS[kind];
+    const localPath = dir && path.join(dir, req.params.file);
+    if (!localPath || !(await exists(localPath))) {
+      logger.warn({ id, kind }, 'cdn resolve found neither a CID nor a local file');
+      return res.status(404).json({ error: 'Not found' });
+    }
+    res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}`);
+    if (req.method === 'HEAD') {
+      res.set('Content-Type', CONTENT_TYPES[path.extname(req.params.file).toLowerCase()]
+        || 'application/octet-stream');
+      res.set('Accept-Ranges', 'bytes');
+      return res.end();
+    }
+    return res.sendFile(localPath);
   }
 
   let upstream;

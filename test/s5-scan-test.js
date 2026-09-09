@@ -331,6 +331,15 @@ async function main() {
     req.end();
   });
 
+  const callNoKey = (method, p) => new Promise((resolve) => {
+    const req = http.request({ port, path: p, method }, (res) => {
+      let text = '';
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => resolve({ status: res.statusCode, text }));
+    });
+    req.end();
+  });
+
   const pub = await call('GET', `/cdn/images/${ULID_A}.webp`);
   ok('cdn serves a public job from S5', pub.status === 200);
 
@@ -431,6 +440,76 @@ async function main() {
   ok('a held job keeps its pending file for the retry',
     fs.existsSync(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_H}.webp`)));
   ok('a broken scanner does not publish', !heldJob.url);
+
+  // --- promote on publish ---
+  // With S5_PROMOTE_ON_PUBLISH an upload clears the scan and lands on local
+  // disk only. The URL is the /cdn/ one from the start, so promoting later
+  // does not change anything an editor has already embedded in a post body.
+  const cfgP = require('../src/config');
+  cfgP.S5_PROMOTE_ON_PUBLISH = true;
+
+  const ULID_D1 = '01J0000000000000000000000K';
+  await makeImage(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_D1}.webp`), 11);
+  await jobs.create(ULID_D1, {
+    state: 'scanning',
+    media_type: 'image',
+    visibility: 'public',
+    pending_file: `${ULID_D1}.webp`,
+    pending_thumb: null,
+  });
+  await processor.finalize(ULID_D1);
+  const draft = await jobs.get(ULID_D1);
+  const draftUrl = draft.url;
+
+  ok('a deferred upload still publishes', draft.state === 'ready');
+  ok('but nothing reached S5', !draft.s5_cid);
+  ok('the slot says why', draft.mirror_state === 'deferred');
+  ok('the file is on local disk',
+    fs.existsSync(path.join(root, dirs.IMAGES_DIR, `${ULID_D1}.webp`)));
+  ok('the URL is already the CDN one, not the local path',
+    draftUrl === `${cfgP.MEDIA_CDN_BASE_URL}/images/${ULID_D1}.webp`);
+  ok('and /cdn serves it from local disk',
+    (await call('GET', `/cdn/images/${ULID_D1}.webp`)).status === 200);
+
+  const promoted = await call('POST', `/media/images/${ULID_D1}.webp/promote`);
+  const afterPromote = await jobs.get(ULID_D1);
+  ok('promote succeeds', promoted.status === 200);
+  ok('it mints a CID', !!afterPromote.s5_cid);
+  ok('the slot is now published', afterPromote.mirror_state === 'published');
+  ok('and the URL did not change', afterPromote.url === draftUrl);
+  ok('the response reports the same URL', JSON.parse(promoted.text).url === draftUrl);
+  ok('/cdn still serves it, now from S5',
+    (await call('GET', `/cdn/images/${ULID_D1}.webp`)).status === 200);
+
+  const again = await call('POST', `/media/images/${ULID_D1}.webp/promote`);
+  ok('a second promote is a no-op, not an error', again.status === 200);
+  ok('and says it was already done', JSON.parse(again.text).already === true);
+
+  // A job still at the gate has not cleared a scan, so promotion must refuse.
+  const ULID_D2 = '01J0000000000000000000000M';
+  await jobs.create(ULID_D2, {
+    state: 'scanning', media_type: 'image', visibility: 'public',
+  });
+  const early = await call('POST', `/media/images/${ULID_D2}.webp/promote`);
+  ok('promoting an unscanned job is refused', early.status === 409);
+  ok('and says it is not published', JSON.parse(early.text).error === 'not_published');
+
+  // A CID cannot be withdrawn, so paywalled bytes must never get one.
+  const ULID_D3 = '01J0000000000000000000000N';
+  await jobs.create(ULID_D3, {
+    state: 'ready', media_type: 'image', visibility: 'private',
+  });
+  const prem = await call('POST', `/media/images/${ULID_D3}.webp/promote`);
+  ok('promoting premium media is refused', prem.status === 409);
+
+  ok('promote needs the upload key',
+    (await callNoKey('POST', `/media/images/${ULID_D1}.webp/promote`)).status === 401);
+
+  // Deferral must not relax the scanner: the destination is still S5.
+  ok('a deferred job is still judged at S5 thresholds',
+    mirror.isImmutable({ mediaType: 'image', visibility: 'public' }) === true);
+
+  cfgP.S5_PROMOTE_ON_PUBLISH = false;
 
   // --- video ---
   // A video whose thumbnail failed to generate must be held for a person, not

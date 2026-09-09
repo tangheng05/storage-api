@@ -188,6 +188,92 @@ async function buildUrlFor(id, kind, visibility, file) {
   return `${config.PUBLIC_BASE_URL}/${kind}/${file}`;
 }
 
+// Publishes a job the scan already cleared to S5, for callers running with
+// S5_PROMOTE_ON_PUBLISH. Idempotent, and the URL is unchanged by design.
+router.post('/:kind/:file/promote', requireUploadKey, async (req, res) => {
+  const parsed = parseFile(req.params.kind, req.params.file);
+  if (!parsed) return res.status(400).json({ error: 'Invalid media reference' });
+
+  const { id, file } = parsed;
+  const { kind } = req.params;
+
+  let job;
+  try {
+    job = await jobs.get(id);
+  } catch {
+    return res.status(409).json({ error: 'job_unreadable' });
+  }
+  if (!job) return res.status(404).json({ error: 'Media not found' });
+
+  // Promotion is publication; anything still at the gate has not cleared a scan.
+  if (job.state !== 'ready') {
+    return res.status(409).json({ error: 'not_published', state: job.state });
+  }
+  // A CID cannot be withdrawn, so paywalled bytes must never get one.
+  if (job.visibility === 'private') {
+    return res.status(409).json({ error: 'premium_media_is_never_promoted' });
+  }
+
+  if (job.s5_cid) {
+    return res.json({ id, promoted: true, already: true, url: job.url });
+  }
+
+  const mediaType = job.media_type;
+  if (!mirror.targetsS5({ mediaType, visibility: 'public' })) {
+    return res.json({ id, promoted: false, reason: 's5_not_enabled_for_type', url: job.url });
+  }
+
+  const filePath = mirror.localPathFor(job, file);
+  if (!filePath || !(await exists(filePath))) {
+    return res.status(409).json({ error: 'local_file_missing' });
+  }
+
+  const patch = {};
+  const main = await mirror.publish({
+    id, kind, mediaType, file, filePath, visibility: 'public', slot: 'main', force: true,
+  });
+  Object.assign(patch, main.patch);
+
+  // Video only, and only if the frame was generated at conversion time.
+  const thumbFile = `${id}.jpg`;
+  const thumbPath = path.join(config.THUMBS_DIR, thumbFile);
+  if (mediaType === 'video' && await exists(thumbPath)) {
+    const thumb = await mirror.publish({
+      id,
+      kind: 'thumbnails',
+      mediaType,
+      file: thumbFile,
+      filePath: thumbPath,
+      visibility: 'public',
+      slot: 'thumb',
+      force: true,
+    });
+    Object.assign(patch, thumb.patch);
+  }
+
+  try {
+    await jobs.update(id, patch);
+  } catch (err) {
+    // The bytes are on S5 but the record did not take the CID, so the boot
+    // sweep cannot find them. Say so rather than report success.
+    logger.error({ id, kind, err: err.message }, 'promoted but the job record did not update');
+    return res.status(500).json({ error: 'promoted_but_not_recorded' });
+  }
+
+  const failed = patch[mirror.SLOTS.main.state] !== 'published';
+  if (failed) {
+    logger.warn({ id, kind, error: patch[mirror.SLOTS.main.error] }, 'promote to s5 failed');
+    return res.status(502).json({
+      error: 'promote_failed',
+      message: patch[mirror.SLOTS.main.error] || 'backend refused the push',
+      url: job.url,
+    });
+  }
+
+  logger.info({ id, kind, cid: patch[mirror.SLOTS.main.cid] }, 'promoted to s5');
+  return res.json({ id, promoted: true, url: main.url || job.url });
+});
+
 // No membership logic by design: the main API decides who is entitled and proves
 // it with a signature; we only check the signature is ours and still fresh.
 router.get('/:kind/:file', async (req, res) => {

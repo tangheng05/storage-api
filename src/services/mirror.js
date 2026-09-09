@@ -42,6 +42,16 @@ function backendFor({ mediaType, visibility = 'public' }) {
   return null;
 }
 
+function targetsS5({ mediaType, visibility = 'public' }) {
+  return backendFor({ mediaType, visibility }) === 's5';
+}
+
+// Separate from isImmutable on purpose: deferring where the bytes go must not
+// relax what the scanner judged them against.
+function deferred({ mediaType, visibility = 'public' }) {
+  return config.S5_PROMOTE_ON_PUBLISH && targetsS5({ mediaType, visibility });
+}
+
 // Picks the scanner's thresholds. Only ever true for S5.
 function isImmutable({ mediaType, visibility = 'public' }) {
   return backendFor({ mediaType, visibility }) === 's5';
@@ -70,13 +80,23 @@ function publicUrl(backend, kind, file) {
 // `url` null means caller keeps its local one; a backend failure is never
 // fatal since the local file is already written and the boot sweep retries.
 async function publish({
-  id, kind, mediaType, file, filePath, visibility = 'public', slot = 'main',
+  id, kind, mediaType, file, filePath, visibility = 'public', slot = 'main', force = false,
 }) {
   const fields = SLOTS[slot];
   const backend = backendFor({ mediaType, visibility });
 
   if (!backend) {
     return { url: null, patch: { [fields.state]: 'skipped' } };
+  }
+
+  // Already the URL S5 will serve, so /promote changes nothing downstream.
+  // `force` is /promote itself: without it the deferral would refuse the very
+  // push it exists to postpone.
+  if (!force && deferred({ mediaType, visibility })) {
+    return {
+      url: publicUrl('s5', kind, file),
+      patch: { [fields.state]: 'deferred', [fields.error]: null },
+    };
   }
 
   try {
@@ -269,6 +289,8 @@ module.exports = {
   recoverOnBoot,
   backendFor,
   isImmutable,
+  targetsS5,
+  deferred,
   publicUrl,
   localPathFor,
   fileFromJob,
