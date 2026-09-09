@@ -5,12 +5,86 @@ Upload and storage for video, audio and images. Files arrive over the
 starting over. Whatever arrives is normalised (ffmpeg for video and audio,
 sharp for images), scanned, then published.
 
-Public files go to **S5**, a content-addressing layer over the
-[Sia](https://sia.tech) network. Sia splits and encrypts a file across many
-independent hosts; S5 names it with a **CID**, the file's BLAKE3 hash. The hash
-is the address, so anyone can verify the bytes they received are the bytes that
-were stored. Paid files stay on local disk behind signed URLs and never get a
-CID.
+Public files are stored on the [Sia](https://sia.tech) network and addressed
+with **S5**. That is the unusual part of this service, so it is worth
+explaining before anything else.
+
+## Content addressing, and what it buys you
+
+Normally a file's address says *where* it is. `https://example.com/cat.jpg`
+points at a machine, and whatever that machine returns is what you get. If it
+returns something else, you have no way to know.
+
+S5 addresses a file by *what it is*. Every public upload gets a **CID**, built
+from the BLAKE3 hash of its bytes:
+
+```
+z2H781TZ...
+│└── base58btc of: 0x26 0x1f │ 32-byte BLAKE3 hash │ size, little-endian
+└─── multibase prefix
+```
+
+So the address is the fingerprint. Hand someone a CID and they can fetch the
+file from anywhere, hash what they got, and confirm it matches. Nobody has to
+trust the server, because a substituted byte changes the hash and therefore
+changes the address. The file cannot be quietly altered under a name that
+stays the same.
+
+That property is worth something specific here: it makes stored media
+independently verifiable, and it makes the storage backend replaceable without
+breaking a single link.
+
+### Where the bytes actually live
+
+Under S5 sits Sia, a storage network of independent operators. A file is
+erasure-coded into shards, encrypted on this machine before it leaves, and the
+shards are placed with hosts who are paid per contract. No host holds a whole
+file, and no host can read what it holds. Lose some hosts and the file
+reconstructs from the remaining shards.
+
+The daemon doing this is `s3d`, which speaks S3 on one side and Sia on the
+other. It is self-hosted, so no third-party account sits in the path. Its
+identity is a 12-word recovery phrase, and that phrase is the only thing that
+can decrypt the data. **Back it up.** Nothing else recovers it.
+
+One behaviour to know about: s3d batches uploads until it can erasure-code a
+full slab, so a fresh file sits in a local pending queue with nothing on Sia
+yet. `s3d status` shows the queue, `s3d flush` forces it, and the deploy notes
+set up an hourly cron so a quiet week does not leave new uploads on one disk.
+
+### How another node finds a file
+
+An S5 node announces to the network which CIDs it can serve. Any other node
+can then resolve a CID it has never seen, by asking its peers. A CID from this
+service resolves on third-party nodes and explorers with no cooperation from
+us, which is the check worth running if you want to confirm the claim rather
+than take it (see [VERIFY.md](VERIFY.md)).
+
+Two honest limits:
+
+**Delivery still comes from this server.** Other nodes can *locate* the file,
+but they fetch it through our gateway, because the copies on Sia hosts are
+ciphertext and only the recovery phrase decrypts them. That is a property of
+client-side encryption, not a gap in the setup. If this server is down, the CID
+will not load even though the bytes are safe on Sia. Recovery means standing up
+another gateway with the same phrase, so this is a durability guarantee, not a
+high-availability one.
+
+**A CID is permanent.** Anyone who has ever held one can fetch that file
+forever, and there is no revocation. That is exactly why paid media never gets
+one, and why `S5_EXPOSE_CID` defaults to off.
+
+### The spec is wrong, and the code says so
+
+`docs.sfive.net` documents BLAKE3 as `0x1e` and a blob CID as
+`0x5b 0x82 0x1e` + hash + size in base16 with an `f` prefix. A real
+s5-dart v0.14.1 node uses `0x1f`, emits `0x26 0x1f` + hash + size, and encodes
+in base58btc with `z`. The tus hash-metadata encoding is not documented at all
+and had to be found by probing a live node.
+
+The constants in `src/services/s5.js` are the ones a real node accepts, with a
+comment saying where they came from. `scripts/s5-probe-tus.js` re-derives them
+against a live node; run it before trusting them on a new node version.
 
 ## How a file gets published
 
@@ -32,10 +106,10 @@ server-side, so no CID is written into a database row and the backend stays
 swappable. **Paid** stays on local disk, served through `/media/...` with an
 HMAC signature.
 
-A CID cannot be withdrawn once it exists, so a public file can never become
-paid: `POST /media/:kind/:file/visibility` returns 409 for anything already on
-S5. Declare `visibility: 'private'` in `Upload-Metadata` at create time
-instead, and the file skips S5 entirely.
+Since a CID cannot be withdrawn, a public file can never become paid:
+`POST /media/:kind/:file/visibility` returns 409 for anything already on S5.
+Declare `visibility: 'private'` in `Upload-Metadata` at create time instead,
+and the file skips S5 entirely.
 
 ## Auth
 
@@ -48,7 +122,7 @@ x-upload-key: <UPLOAD_API_KEY>
 Creating an upload also returns a scoped token in `X-Upload-Token`, good for
 that job only, only while it uploads, and unable to delete. A browser or an
 outside auditor can poll with it instead of the shared key
-(`scripts/grant-upload.js` mints one; see [VERIFY.md](VERIFY.md)).
+(`scripts/grant-upload.js` mints one).
 
 `/moderation/*` uses its own `MODERATION_API_KEY`, since the upload key goes to
 other services and should not be enough to write the blocklist.
@@ -75,9 +149,6 @@ failed`. `rejected` means the scanner refused the file and the bytes were
 thrown away; `scan_reasons` carries the categories to show the uploader,
 without the scores behind them. Nothing waits on a person.
 
-`s5_cid` appears only with `S5_EXPOSE_CID=true`, and only for public files.
-Treat it as permanent once shown.
-
 ## Limits and formats
 
 2GB per file, 20MB for images, 30 new uploads per IP per hour.
@@ -93,7 +164,8 @@ Treat it as permanent once shown.
   BMP, and rasterising untrusted SVG is an attack surface.
 
 Images are re-encoded even when the format survives, so published bytes are not
-identical to uploaded ones. The CID addresses the published file.
+identical to uploaded ones. The CID addresses the published file, which is what
+a verifier should hash.
 
 ## Scanning
 
@@ -124,17 +196,17 @@ npm test
 `MEDIA_SIGNING_SECRET` starts empty and fails closed, so paid delivery returns
 nothing locally until it is set.
 
-`scripts/` holds the operational tools: `storage-verify.js` (`--fix` re-pushes),
-`storage-backfill.js`, `storage-restore.js`, `grant-upload.js`,
+`scripts/` holds the operational tools: `storage-verify.js` (`--fix`
+re-pushes), `storage-backfill.js`, `storage-restore.js`, `grant-upload.js`,
 `scan-score.js`, and a few S5/s3d probes. Each prints its own usage.
 
 ## Deploying
 
 [deploy/SETUP.md](deploy/SETUP.md) is the VPS runbook: nginx, systemd, certbot,
 DNS, and the `tus-js-client` snippet for the frontend.
-[deploy/s5/README.md](deploy/s5/README.md) covers the S5 node and the s3d
-daemon that puts bytes on Sia, including where the S5 spec is wrong and why s3d
-holds files back until a batch fills.
+[deploy/s5/README.md](deploy/s5/README.md) covers the S5 node and s3d, the
+`cdnUrls` setting without which every node read fails, and the rest of the S5
+spec divergences.
 
 One thing to know before wiring up a frontend: CDNs cap request bodies, and
 Cloudflare's cap is 100MB. That is why uploads go in 50MB tus chunks. Large
