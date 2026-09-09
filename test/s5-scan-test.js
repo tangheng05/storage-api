@@ -680,6 +680,35 @@ async function main() {
   // like a blank image, and the provider silently passed everything.
   cfg2.SCAN_PROVIDERS = ['gemini'];
   cfg2.SCAN_GEMINI_API_KEY = 'test-key';
+
+  // 2.5 models think by default, which took ~30s on a call returning three
+  // integers -- the whole reason an upload felt slow.
+  let sentBody = null;
+  global.fetch = async (url, init) => {
+    sentBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      json: async () => ({
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: JSON.stringify({ sexual: 0, violence: 0, weapons: 0 }) }] },
+        }],
+      }),
+    };
+  };
+  await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  ok('thinking is switched off for the classifier',
+    sentBody.generationConfig.thinkingConfig.thinkingBudget === 0);
+  ok('the schema still pins integers', !!sentBody.generationConfig.responseSchema);
+  ok('and temperature stays at 0', sentBody.generationConfig.temperature === 0);
+
+  cfg2.SCAN_GEMINI_THINKING_BUDGET = -1;
+  sentBody = null;
+  await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false });
+  ok('-1 omits the field for models that reject it',
+    sentBody.generationConfig.thinkingConfig === undefined);
+  cfg2.SCAN_GEMINI_THINKING_BUDGET = 0;
+
   const classified = (rating, extra = {}) => {
     global.fetch = async () => ({
       ok: true,

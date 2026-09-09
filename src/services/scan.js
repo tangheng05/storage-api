@@ -252,6 +252,9 @@ async function runGemini(filePath) {
           responseMimeType: 'application/json',
           responseSchema: GEMINI_SCHEMA,
           temperature: 0,
+          ...(config.SCAN_GEMINI_THINKING_BUDGET >= 0
+            ? { thinkingConfig: { thinkingBudget: config.SCAN_GEMINI_THINKING_BUDGET } }
+            : {}),
         },
         safetySettings: HARM_CATEGORY_ALL.map((category) => ({ category, threshold: 'BLOCK_NONE' })),
       }),

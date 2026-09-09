@@ -152,6 +152,9 @@ module.exports = {
   SCAN_VISION_CATEGORIES: csv(process.env.SCAN_VISION_CATEGORIES, 'adult,violence'),
   // Image is scored against a responseSchema (asked directly), not via safetyRatings -- those rate the model's own answer, not the input image, so they're useless here.
   SCAN_GEMINI_API_KEY: process.env.SCAN_GEMINI_API_KEY || '',
+  // 2.5 models think by default, which costs ~30s on a call that returns three
+  // integers. 0 disables it; -1 omits the field for models that reject it.
+  SCAN_GEMINI_THINKING_BUDGET: num(process.env.SCAN_GEMINI_THINKING_BUDGET, 0),
   SCAN_GEMINI_MODEL: process.env.SCAN_GEMINI_MODEL || 'gemini-2.5-flash',
   // 'weapons' is deliberately out: a legitimate firearm photo rates 100 there, not a takedown reason on a social platform.
   SCAN_GEMINI_CATEGORIES: csv(process.env.SCAN_GEMINI_CATEGORIES, 'sexual,violence'),
