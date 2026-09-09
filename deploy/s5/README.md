@@ -95,6 +95,22 @@ have worked, presigning bug or not.
 
 `npm run test:blob` covers our side of it. Only a live node proves the rest.
 
+## s3d holds bytes back until a batch fills
+
+`s3d status` reports an upload pipeline, and a fresh object lands in
+**Pending**, not on Sia. s3d waits for enough data to erasure-code a full slab,
+so on a quiet week the newest uploads sit on this one disk with no Sia copy --
+the exact loss the Sia copy exists to survive. `Failed Uploads: 0` alongside
+`Uploaded Objects: 0` is this, not a fault.
+
+`s3d flush` forces it, and is a no-op when nothing is pending, so an hourly
+cron closes the window:
+
+    0 * * * * /usr/bin/docker exec s3d s3d flush >/dev/null 2>&1
+
+Check with `docker exec s3d s3d status` -- Uploaded should climb and Pending
+should stay small.
+
 ## Things that cost us time
 
 **Do not enable `[accounts]`.** It stops the admin key working on the download
