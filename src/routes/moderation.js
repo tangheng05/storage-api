@@ -17,24 +17,17 @@ const appendHash = async (hash, id) => {
 `);
 };
 
-/*
-| Takedown tools. Master key only - operator endpoints, not user-facing.
-|
-| There is no review queue: the gate decides on one threshold and there is
-| nobody to hand a borderline file to. What survives here is the after-the-fact
-| half, for content that got through and should not have.
-|
-| Blocklisting records the file's perceptual hash, so the same picture is
-| refused automatically from then on - no model, no API call, no cost. Nothing
-| automatic ever writes to that list; only a person calling this route does.
-*/
+// Takedown tools, master key only. There's no review queue -- the gate decides
+// on a single threshold; this is the after-the-fact half for content that got
+// through. Blocklisting records the file's perceptual hash so the same
+// picture is refused automatically from then on; only a person calling this
+// route writes to that list.
 
 router.use(requireModerationKey);
 
-
-// POST /moderation/blocklist — takes a phash or the id of an already-published
-// job, so a takedown and preventing its return are one action. Deleting the
-// media itself still goes through the DELETE routes.
+// Takes a phash or the id of an already-published job, so a takedown and
+// preventing its return are one action. Deleting the media itself still goes
+// through the DELETE routes.
 router.post('/blocklist', async (req, res, next) => {
   try {
     const { id, phash } = req.body || {};
@@ -60,7 +53,6 @@ router.post('/blocklist', async (req, res, next) => {
   }
 });
 
-// GET /moderation/stats — how the gate is behaving, for tuning thresholds.
 router.get('/stats', async (req, res, next) => {
   try {
     const counts = {};

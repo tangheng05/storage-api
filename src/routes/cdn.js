@@ -8,18 +8,11 @@ const logger = require('../services/logger');
 
 const router = express.Router();
 
-// Serves public media under a stable ULID URL, fetching it from S5 by CID:
-//   /cdn/videos/01J....mp4  ->  S5 node /<CID>  ->  streamed to the viewer
-//
-// serey-api freezes these strings into post rows permanently, so a raw CID
-// would commit the platform to S5 for the life of the post. With the ULID in
-// the path the backend stays swappable and deleting the job stops the URL
-// resolving.
-//
-// Proxied rather than redirected because the node's download route requires the
-// bearer token: a browser sent there anonymously gets a 404, and opening it up
-// via [accounts] needs an account-token flow the S5 docs never specify. Keeping
-// the token here also means the node needs no public hostname at all.
+// Resolves a stable ULID URL to S5's CID and proxies the bytes -- keeps the
+// backend swappable instead of freezing a raw CID into post rows, and lets a
+// deleted job stop the URL resolving. Proxied rather than redirected: the
+// node's download route requires the bearer token, which an anonymous
+// redirect target would not have.
 
 const KINDS = ['videos', 'audio', 'images', 'thumbnails'];
 
@@ -33,8 +26,7 @@ const CONTENT_TYPES = {
   '.jpg': 'image/jpeg',
 };
 
-// Anchored, and the extension holds no dot or slash, so a filename can never
-// walk out of its namespace.
+// Anchored; extension holds no dot or slash, so a filename can't walk out of its namespace.
 const FILE_RE = /^([0-9A-HJKMNP-TV-Z]{26})(\.[A-Za-z0-9]{1,5})$/;
 
 router.all('/:kind/:file', async (req, res) => {
@@ -55,21 +47,19 @@ router.all('/:kind/:file', async (req, res) => {
     return res.status(400).json({ error: 'Invalid media reference' });
   }
 
-  // A deleted job stops resolving. Same response for ids that never existed,
-  // so this cannot be used to probe which are real.
+  // Same response whether deleted or never-existed, so this can't probe which ids are real.
   if (!job || job.state !== 'ready') return res.status(404).json({ error: 'Not found' });
 
   // Premium goes through /media with a signature; answering here would be a
-  // paywall bypass by redirect. Thumbnails are exempt because they are
-  // published public by design — a locked card still shows its poster.
+  // paywall bypass. Thumbnails are exempt -- published public by design, so a
+  // locked card still shows its poster.
   if (job.visibility === 'private' && kind !== 'thumbnails') {
     return res.status(404).json({ error: 'Not found' });
   }
 
   const cid = kind === 'thumbnails' ? job.s5_thumb_cid : job.s5_cid;
   if (!cid) {
-    // s3d or local-only: nginx serves those directly, so the URL was built
-    // wrong.
+    // s3d or local-only: nginx serves those directly, so this URL was built wrong.
     logger.warn({ id, kind }, 'cdn resolve for media with no CID');
     return res.status(404).json({ error: 'Not found' });
   }
@@ -88,14 +78,11 @@ router.all('/:kind/:file', async (req, res) => {
     return res.status(502).json({ error: 'Upstream unavailable' });
   }
 
-  // Content addressed bytes cannot change, so the blob itself is safe to cache
-  // forever — Cloudflare then serves it once per edge instead of once per
-  // viewer, which is what keeps proxying affordable. The ULID -> CID mapping is
-  // NOT immutable, but a deleted job stops resolving above, before we get here.
+  // Content-addressed bytes can't change, so caching forever is safe -- the
+  // ULID -> CID mapping isn't immutable, but a deleted job stops resolving above.
   res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}, immutable`);
   res.set('Content-Type', CONTENT_TYPES[path.extname(req.params.file).toLowerCase()]
     || 'application/octet-stream');
-  // Range support, so video seeking works through the proxy.
   res.set('Accept-Ranges', 'bytes');
   for (const h of ['content-length', 'content-range']) {
     const v = upstream.headers.get(h);

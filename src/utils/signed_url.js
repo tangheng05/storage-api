@@ -2,25 +2,12 @@ const crypto = require('crypto');
 
 const config = require('../config');
 
-/*
-|--------------------------------------------------------------------------
-| Signed media URLs
-|--------------------------------------------------------------------------
-|
-| Private objects are delivered through /media/... and only to a caller holding
-| a valid signature. serey-api mints these: it is the service that knows who
-| paid, and it shares MEDIA_SIGNING_SECRET with us, so no extra round trip is
-| needed and this service never has to understand memberships.
-|
-| The signature covers the object path AND the expiry, so neither can be edited
-| without invalidating it. A leaked URL stops working once `exp` passes, which
-| is the whole point: it turns "anyone with the link, forever" into "anyone with
-| the link, for the next few minutes".
-|
-*/
+// Private objects are delivered through /media/... only to a caller holding a
+// valid signature, minted by serey-api. It covers the object path AND the
+// expiry, so neither can be edited without invalidating it -- a leaked URL
+// stops working once `exp` passes.
 
-// Same string on both sides. Keep this format in sync with serey-api's
-// utils/premium_util.js signMediaUrl().
+// Keep this format in sync with serey-api's utils/premium_util.js signMediaUrl().
 const payload = (object_path, exp) => `${object_path}|${exp}`;
 
 const sign = (object_path, exp) =>
@@ -40,8 +27,7 @@ const safeEqual = (a, b) => {
  */
 const verify = ({ object_path, exp, sig }) => {
   if (!config.MEDIA_SIGNING_SECRET) {
-    // Fail closed. Without a secret every signature would be forgeable, so a
-    // misconfigured deploy must serve nothing rather than serve everything.
+    // Fail closed: without a secret every signature is forgeable.
     return { ok: false, reason: 'signing_not_configured' };
   }
 
@@ -54,8 +40,7 @@ const verify = ({ object_path, exp, sig }) => {
     return { ok: false, reason: 'bad_expiry' };
   }
 
-  // Expiry first: an expired-but-valid link and a forged one should both be
-  // rejected, and checking this before the HMAC keeps the cheap test first.
+  // Expiry checked before the HMAC: cheap test first, and both should reject.
   if (expires_at * 1000 < Date.now()) {
     return { ok: false, reason: 'expired' };
   }

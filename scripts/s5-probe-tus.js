@@ -1,17 +1,9 @@
 #!/usr/bin/env node
-/*
-| Find the tus hash-metadata encoding a real S5 node accepts.
-|
-|   node scripts/s5-probe-tus.js /tmp/fresh.webp
-|
-| The spec says only "BASE64URL(0x1e || hash)" and never shows a request, and a
-| live node rejects that with "Invalid hash found". Two unknowns: which byte
-| prefixes the hash (the node's own CIDs use 0x1f where the spec says 0x1e), and
-| how many times the value is encoded (tus itself requires base64 metadata).
-|
-| So ask the node. Each variant does a real create + PATCH and reports the
-| status. Whatever returns 204 is the answer; put it in s5.js.
-*/
+// Re-derives the S5 CID hash-prefix byte and tus hash-metadata encoding
+// empirically against a live node, since docs.sfive.net documents different
+// values. Whatever variant gets a 204 is the answer; put it in s5.js. Re-run
+// before trusting the constants on a new node version.
+//   node scripts/s5-probe-tus.js <file>   (needs S5_NODE_URL, S5_AUTH_TOKEN)
 const fs = require('fs');
 const { blake3 } = require('@noble/hashes/blake3');
 const config = require('../src/config');
@@ -29,7 +21,6 @@ if (!config.S5_NODE_URL || !config.S5_AUTH_TOKEN) {
 const bytes = fs.readFileSync(file);
 const hash = Buffer.from(blake3(bytes));
 
-// value = what the node should see after tus base64-decodes the metadata
 const variants = [];
 for (const [name, prefix] of [['0x1e', 0x1e], ['0x1f', 0x1f], ['none', null]]) {
   const raw = prefix === null ? hash : Buffer.concat([Buffer.from([prefix]), hash]);
@@ -45,9 +36,8 @@ const headers = (extra) => ({
 });
 
 async function attempt({ label, value }, key, doubleEncode) {
-  // tus requires metadata values to be base64. doubleEncode=false sends the
-  // value as the base64 payload directly, which only makes sense if the value
-  // is already base64-ish -- both are worth trying since the spec is silent.
+  // doubleEncode=false sends value as the base64 payload directly; worth
+  // trying since the spec never says which.
   const meta = doubleEncode
     ? `${key} ${Buffer.from(value).toString('base64')}`
     : `${key} ${value}`;

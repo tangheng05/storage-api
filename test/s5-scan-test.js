@@ -1,15 +1,10 @@
 #!/usr/bin/env node
 /*
-| S5 + scan-gate integration test. No framework: node test/s5-scan-test.js
-|
+| S5 + scan-gate integration test: node test/s5-scan-test.js (no framework).
 | Drives the real s5, scan, mirror and processor modules against an in-process
-| stub node. Proves our side of the contract — the CID layout, both upload
-| paths, backend routing, thresholds, and above all that a file failing the scan
-| never reaches a served directory or a backend.
-|
-| The CID vector, the tus hash metadata and the upload response shape were all
-| confirmed against a live s5-dart v0.14.1 node (see scripts/s5-probe-tus.js).
-| The unpin route remains undocumented and unproven.
+| stub node -- the CID layout, both upload paths, backend routing, thresholds,
+| and above all that a file failing the scan never reaches a served directory
+| or a backend. The unpin route remains undocumented and unproven.
 */
 const http = require('http');
 const fs = require('fs');
@@ -267,7 +262,6 @@ async function main() {
   ok('a clean upload lands in the served dir',
     fs.existsSync(path.join(root, dirs.IMAGES_DIR, `${ULID_A}.webp`)));
 
-  // Blocklisted: rejected, and never published anywhere.
   const blocked = path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_B}.webp`);
   await makeImage(blocked, 29);
   await fsp.writeFile(process.env.SCAN_BLOCKLIST_PATH, `${await scan.perceptualHash(blocked)}\n`);
@@ -293,7 +287,6 @@ async function main() {
   await jobs.create(ULID_C, {
     state: 'scanning', media_type: 'image', visibility: 'public', pending_file: `${ULID_C}.webp`,
   });
-  // Mid-band classifier score on an immutable destination.
   const realProviders = require('../src/config').SCAN_PROVIDERS;
   require('../src/config').SCAN_PROVIDERS = ['http'];
   require('../src/config').SCAN_HTTP_URL = `http://127.0.0.1:${PORT}/never`;
@@ -419,7 +412,6 @@ async function main() {
   ok('it never reached S5', blobs.get('last') === beforeFlip);
   ok('it is served through the signed /media path', /\/media\/images\//.test(flipped.url));
 
-  // A broken scanner must hold, not publish.
   const ULID_H = '01J0000000000000000000000H';
   await makeImage(path.join(root, dirs.PENDING_IMAGES_DIR, `${ULID_H}.webp`), 83);
   await jobs.create(ULID_H, {
@@ -455,8 +447,6 @@ async function main() {
   });
   await processor.finalize(ULID_V);
   const noThumb = await jobs.get(ULID_V);
-  // Unscannable is refused, not published: the one file the gate could not read
-  // is the last one that should end up on the far side of it.
   ok('a video with no thumbnail is refused', noThumb.state === 'rejected');
   ok('it is not published', !noThumb.url);
   ok('it says why', (noThumb.scan_labels || []).includes('no_thumbnail'));
@@ -534,7 +524,6 @@ async function main() {
   ok('a safety block counts as a reject',
     (await scan.scanFile({ filePath: small, mediaType: 'image', immutable: false })).verdict === 'reject');
 
-  // anything unparseable must fail closed, never pass
   global.fetch = async () => ({
     ok: true,
     json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'sorry' }] } }] }),
@@ -574,14 +563,10 @@ async function main() {
   global.fetch = keepFetch2;
   cfg2.SCAN_PROVIDERS = keepProv;
 
-  /*
-  | The classifier does not give the same answer twice. In production the same
-  | file scored 0.45 and 0.85 on consecutive uploads -- either side of the
-  | threshold -- which made pressing upload again a re-roll: a refused image got
-  | through on a later try, and a clean one failed for no visible reason. The
-  | verdict cache takes the dice away, so this drives a deliberately
-  | flip-flopping classifier and checks the second answer matches the first.
-  */
+  // In production the same file scored 0.45 and 0.85 on consecutive uploads --
+  // either side of the threshold -- making a retry a re-roll. The verdict
+  // cache fixes that; drive a deliberately flip-flopping classifier and check
+  // the second answer matches the first.
   const cfg3 = require('../src/config');
   const keepProv3 = cfg3.SCAN_PROVIDERS;
   const keepUrl3 = cfg3.SCAN_HTTP_URL;

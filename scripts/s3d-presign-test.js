@@ -1,18 +1,8 @@
 #!/usr/bin/env node
-/*
-| Does s3d serve a PRESIGNED GET the same as an SDK-signed one?
-|
-|   AK=<access> SK=<secret> node scripts/s3d-presign-test.js <published-file>
-|
-| The S5 node reads blobs from an S3 store via presigned URLs -- visible in its
-| log as `[try] http://s3d:8000/media/1/...?X-Amz-Algorithm=...`. That is a
-| different path through s3d than the SDK-signed request scripts/s3d-verify.js
-| uses, and that one already proved the bytes are stored intact.
-|
-| So this fetches the same object the way the node does, and hashes it. It also
-| repeats the 256KB range read the node performs, and signs one URL with the
-| literal region "null" that the node's minio client emits.
-*/
+// s3d does not implement presigned GET -- it returns 403 AccessDenied, which
+// is what broke S5's reads through its S3 store (the node fetches blobs via
+// presigned URLs; scripts/s3d-verify.js already proved the bytes are intact).
+//   AK=<access> SK=<secret> node scripts/s3d-presign-test.js <published-file>
 const fs = require('fs');
 const { blake3 } = require('@noble/hashes/blake3');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -58,7 +48,7 @@ async function fetchAndHash(label, url, headers = {}) {
   console.log();
 
   const normal = clientFor('us-east-1');
-  const nulled = clientFor('null'); // what the node's minio client actually sends
+  const nulled = clientFor('null'); // the node's minio client signs with region "null"
 
   const cmd = () => new GetObjectCommand({ Bucket: BUCKET, Key: key });
 
@@ -72,13 +62,8 @@ async function fetchAndHash(label, url, headers = {}) {
   await fetchAndHash('presigned + Range 0-262143', signed, { range: 'bytes=0-262143' });
   await fetchAndHash('presigned + Range 0-1023', signed, { range: 'bytes=0-1023' });
 
-  // The outboard BLAKE3 tree S5 uses for verified streaming. If this is the
-  // wrong size for the object, verification cannot succeed no matter what the
-  // data path does.
-  // Sized only if it actually arrived. An earlier version of this script read
-  // the length of a 403 body and announced the outboard was too small, which is
-  // the same mistake the node makes -- drawing a confident conclusion from an
-  // error page.
+  // The outboard BLAKE3 tree S5 needs for verified streaming. Only meaningful
+  // if it actually arrived -- an error body's length is not the outboard's size.
   const obao = await getSignedUrl(normal, new GetObjectCommand({ Bucket: BUCKET, Key: `${key}.obao` }), { expiresIn: 3600 });
   const res = await fetch(obao);
   const tree = Buffer.from(await res.arrayBuffer());

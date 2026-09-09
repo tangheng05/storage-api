@@ -1,18 +1,8 @@
 #!/usr/bin/env node
-/*
-| Resolve an S5 CID to its blob URL, fetch it, and check the bytes are what the
-| CID says they are.
-|
-|   node scripts/s5-cid-to-key.js <cid> [baseUrl]
-|
-| Runs from anywhere -- that is the point. The CID carries a BLAKE3 hash, so a
-| stranger can verify these bytes without trusting us, the host serving them, or
-| the network in between. If this prints "hash OK" on a machine that is not the
-| server, fetch-by-CID genuinely works.
-|
-| Default baseUrl is our own /blob route. Point it at any S5 gateway that serves
-| the same key layout to check the bytes came back identical from there too.
-*/
+// Resolve an S5 CID to its blob URL, fetch it, and check the bytes match the
+// CID's BLAKE3 hash -- runs from anywhere, so a stranger can verify without
+// trusting us or the network in between.
+//   node scripts/s5-cid-to-key.js <cid> [baseUrl]   (baseUrl default: our /blob route)
 const { blake3 } = require('@noble/hashes/blake3');
 
 const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -80,7 +70,6 @@ const url = `${base}${key}`;
     process.exit(1);
   }
 
-  // The whole point of content addressing: the name proves the bytes.
   const ok = Buffer.from(blake3(body)).equals(hash);
   console.log(ok ? 'hash OK — these are the bytes the CID names' : 'HASH MISMATCH — wrong bytes served');
   process.exit(ok ? 0 : 1);

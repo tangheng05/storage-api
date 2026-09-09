@@ -1,11 +1,12 @@
 {
   "name": "serey-video-storage-api",
   "version": "1.0.0",
-  "description": "Dedicated video upload/storage API for Serey (tus resumable uploads + ffmpeg processing)",
+  "description": "Video, audio and image upload/storage API for Serey (tus resumable uploads, content scanning, S5/s3d backends)",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
+    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js",
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
     "test:blob": "node test/s5-blob-test.js"

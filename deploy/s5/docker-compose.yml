@@ -2,20 +2,15 @@
 #
 #   storage API -> S5 node -> [store.s3] -> s3d -> Sia network
 #
-# S5 gives CIDs, verified streaming and lookup. It holds nothing itself: where
-# the bytes land is [store] in its config.toml. Pointing that at s3d puts them
-# on Sia, erasure-coded across independent hosts and encrypted client-side, so
-# no host and no gateway ever sees plaintext.
-#
+# S5 holds nothing itself; [store] in its config.toml decides where bytes land.
 # Both containers share a network, so S5 reaches s3d at http://s3d:8000 and
-# neither port needs publishing. The S5 API is published on the docker bridge
-# only, because Nginx Proxy Manager runs in its own container and cannot reach
-# 127.0.0.1 on the host.
+# neither port needs publishing publicly.
 #
-# State lives under /var/lib, deliberately outside the checkout:
+# State lives under /var/lib, outside the checkout. BACK BOTH UP:
 #   /var/lib/s5/config/config.toml   an unrecoverable keypair seed
 #   /var/lib/s3d/s3d.yml             the 12-word recovery phrase
-# BACK BOTH UP. Losing the s3d phrase loses access to everything on Sia.
+#
+# See README.md in this directory before changing anything.
 
 services:
   s5:
@@ -24,16 +19,16 @@ services:
     restart: unless-stopped
     depends_on:
       - s3d
-    # NPM is containerised, so it cannot reach 127.0.0.1 on the host. 172.18.0.1
-    # is the bridge gateway; check yours with `docker network inspect`.
+    # NPM is containerised and cannot reach the host's 127.0.0.1. 172.18.0.1 is
+    # the bridge gateway; check yours with `docker network inspect`.
     ports:
       - "172.18.0.1:5050:5050"
     volumes:
       - /var/lib/s5/config:/config
       - /var/lib/s5/db:/db
       - /var/lib/s5/cache:/cache
-      # Only used by the local filesystem store. Keep it mounted so switching
-      # [store] back for a test needs no compose change.
+      # Local filesystem store only. Mounted so switching [store] back for a
+      # test needs no compose change.
       - /var/lib/s5/data:/data
     logging:
       driver: json-file
@@ -43,10 +38,8 @@ services:
     image: ghcr.io/siafoundation/s3d:master
     container_name: s3d
     restart: unless-stopped
-    # Loopback only. S5 reaches it over the compose network at http://s3d:8000;
-    # this mapping is for bucket management and debugging from the host, since
-    # s3d has no CLI for buckets. Run other CLI commands with
-    # `docker compose run --rm s3d <command>`.
+    # Loopback only -- for bucket management from the host, since s3d has no
+    # bucket CLI. Other commands: `docker compose run --rm s3d <command>`.
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

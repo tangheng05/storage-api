@@ -34,7 +34,6 @@ setInterval(() => {
   }).catch((err) => logger.error({ err: err.message }, 'expired upload cleanup failed'));
 
   // Retry anything the scan gate is holding, and any storage push that failed.
-  // Without this a scanner or backend that recovers mid-day waits for a restart.
   try {
     processor.sweepHeld();
     mirror.recoverOnBoot();

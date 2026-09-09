@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 /*
 | Mint a scoped upload session for someone who should not hold the master key.
-|
 |   node scripts/grant-upload.js <filename> <bytes> <mimetype> [owner]
-|
-| The token is valid for that one upload id, dies when the upload completes, and
-| cannot delete. Run against the live ENDPOINT: the issuing instance is the only
-| one that honours it.
+| Token is valid for that one upload id only, dies on completion, cannot
+| delete, and only the issuing ENDPOINT instance honours it.
 */
 const fs = require('fs');
 const path = require('path');

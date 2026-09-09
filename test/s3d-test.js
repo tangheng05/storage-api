@@ -1,18 +1,10 @@
 #!/usr/bin/env node
 /*
-| Sia integration test. A manual integration script in the same spirit as
-| upload-test.js: no framework, just run it.
-|
-|   node test/sia-test.js
-|
-| It starts an in-process S3-compatible stub (multipart and fault injection
-| included) and drives src/services/sia.js and src/services/mirror.js against
-| it. That proves our side of the contract: key naming, multipart, round trips,
-| visibility moves, purge, and that a Sia outage degrades to local delivery
-| rather than failing an upload.
-|
-| It does NOT prove that Sia's own s3d gateway behaves this way. Only real
-| credentials can do that.
+| Sia integration test: node test/sia-test.js (no framework, just run it).
+| Drives src/services/sia.js and src/services/mirror.js against an in-process
+| S3-compatible stub. Proves our side of the contract -- key naming, multipart,
+| round trips, visibility moves, purge, outage fallback -- NOT that Sia's own
+| s3d gateway behaves this way; only real credentials can prove that.
 */
 const http = require('http');
 const fs = require('fs');
@@ -126,7 +118,6 @@ async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sia-test-'));
   const ID = '01J0000000000000000000000A';
 
-  // Small file: the image path.
   const small = path.join(dir, `${ID}.webp`);
   const smallBytes = Buffer.from('webp-ish bytes '.repeat(40));
   fs.writeFileSync(small, smallBytes);
@@ -155,7 +146,6 @@ async function main() {
   await sia.getToFile({ key: bigKey, filePath: bigBack });
   check('multipart upload round trips intact', md5(fs.readFileSync(bigBack)) === md5(bigBytes));
 
-  // Visibility move.
   const privKey = sia.buildKey({ kind: 'images', file: `${ID}.webp`, visibility: 'private' });
   await sia.moveObject({ fromKey: pub.patch.sia_key, toKey: privKey });
   check('object moved to private/', (await sia.headObject(privKey)) !== null);

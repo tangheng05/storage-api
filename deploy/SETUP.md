@@ -114,8 +114,11 @@ In the Cloudflare dashboard for serey.io:
 - Add an **A record**: name `storage`, value = VPS public IP, **Proxied (orange
   cloud)**.
 - SSL/TLS mode: **Full (strict)** once NPM has its certificate.
-- Optional but recommended: Cloudflare → Rules → Cache Rules → *Bypass cache*
-  for `storage.serey.io/files/*` (upload traffic should never be cached).
+- Cloudflare → Rules → Cache Rules → *Bypass cache* for
+  `storage.serey.io/files/*` (upload traffic should never be cached) **and for
+  `storage.serey.io/media/*`**. The paywall relies on Cloudflare honouring
+  `private, no-store`; one "ignore query string" rule would turn a subscriber's
+  signed URL into a public one.
 
 ## 7. Nginx Proxy Manager
 
@@ -139,7 +142,9 @@ In the Cloudflare dashboard for serey.io:
 Create a **Proxy Host**:
 
 - Domain: `storage.serey.io`
-- Forward to: `http://127.0.0.1:8080` (or the app container/IP)
+- Forward to: `http://127.0.0.1:8080`. **If NPM itself runs in Docker it cannot
+  reach the host's loopback** -- use the bridge gateway (`172.18.0.1:8080`, or
+  whatever `docker network inspect` reports) or the forward returns 502.
 - SSL tab: request a Let's Encrypt cert — use a **DNS challenge** with your
   Cloudflare API token (HTTP challenge is unreliable behind the CF proxy).
   Enable "Force SSL".
@@ -204,8 +209,9 @@ S5_NODE_URL=http://127.0.0.1:5050
 S5_AUTH_TOKEN=
 ```
 
-The S5 node runs as a container behind the proxy. Compose file and an annotated
-config reference live in [`deploy/s5/`](s5/):
+The S5 node and s3d run as containers. Compose file and the full annotated
+reference live in [`deploy/s5/`](s5/), which is the source of truth for this
+part -- read it before changing anything here:
 
 ```bash
 cd /opt/serey-storage-api/deploy/s5
@@ -213,26 +219,41 @@ docker compose up -d
 docker compose logs -f s5        # config.toml is generated on first boot
 ```
 
-Then edit `deploy/s5/config/config.toml`:
+State lives outside the checkout, at `/var/lib/s5/config/config.toml` and
+`/var/lib/s3d/s3d.yml`. **Back both up.** The s3d file holds the 12-word
+recovery phrase, and losing it loses access to everything on Sia.
 
-- `[http.api] domain` must match the hostname the proxy serves (`s5.serey.io`).
-  The node builds download URLs from it, and a mismatch gives broken links that
-  look like a caching problem.
-- `[store.s3]` — point it at your sia.storage s3d gateway using the access key
-  and secret from that dashboard's My Apps page. **This is the decision that
-  matters**: with the default local filesystem store the blobs sit on this same
-  VPS disk, so you get two copies on one volume and no protection against the
-  failure the second copy exists for.
+Three settings in the node's `config.toml` that are not optional:
+
+- `[http.api] domain` must match the hostname the proxy serves. The node builds
+  its own URLs from it, and a mismatch gives broken links that look like a
+  caching problem.
+- `[store.s3]` pointed at `http://s3d:8000` over the compose network, using a
+  key minted with `docker compose run --rm s3d keys create s5`. With the default
+  local filesystem store the blobs sit on this same VPS disk -- two copies on
+  one volume, and no protection against the failure the second copy exists for.
+- `cdnUrls` pointed at `https://storage.serey.io/blob`. **Without it every read
+  fails.** S5's S3 store reads only through presigned URLs, which s3d treats as
+  anonymous and refuses; the node then reports an integrity error because it
+  hashed the 403 body. `deploy/s5/README.md` has the full account.
 
 `docker compose restart s5` after editing, then mint a token for
 `S5_AUTH_TOKEN`.
 
-Add `s5.serey.io` as a second NPM proxy host pointing at `127.0.0.1:5050`. It
-has to be publicly reachable: `/cdn` 302-redirects the *browser* there, so a
-localhost-only node produces dead media links. Cache hard on that hostname —
-content-addressed bytes never change, so `public, max-age=31536000, immutable`
-is always correct for the blob (but not for the `/cdn` redirect itself, which
-has to be able to reflect a delete).
+The node does **not** need to be publicly reachable. `/cdn` proxies the bytes
+through this app rather than redirecting, because S5's download route requires
+the bearer token -- so there is no second proxy host to create and no browser
+ever talks to the node directly.
+
+Two more env vars once a real upload has round-tripped:
+
+```bash
+# Lets a client read the CID of its own public media. One-way: a CID shown once
+# is a permanent public handle and cannot be withdrawn.
+S5_EXPOSE_CID=false
+# Serves S5's blobs back to the node and its peers. Required by cdnUrls above.
+S5_BLOB_ENABLED=true
+```
 
 Keep `USE_X_ACCEL=false` unless you have pasted the `/internal-media/` location
 into NPM's Advanced box — nothing else honours `X-Accel-Redirect`, and premium
@@ -248,6 +269,18 @@ cat > /etc/cron.daily/serey-storage-cleanup <<'EOF'
 find /var/lib/serey-storage/tus -type f -mtime +2 -delete
 EOF
 chmod +x /etc/cron.daily/serey-storage-cleanup
+```
+
+## 8b. Flush s3d to Sia hourly
+
+s3d batches uploads until it can erasure-code a full slab, so a fresh object
+sits in its local pending queue with nothing on Sia yet. On a quiet week that
+leaves the newest uploads on one disk. `s3d flush` is a no-op when nothing is
+pending, so run it hourly:
+
+```bash
+( crontab -l 2>/dev/null; echo '0 * * * * /usr/bin/docker exec s3d s3d flush >/dev/null 2>&1' ) | crontab -
+docker exec s3d s3d status     # Uploaded should climb, Pending stay small
 ```
 
 ## 9. Smoke test

@@ -7,16 +7,12 @@ const queue = require('./queue');
 const sia = require('./sia');
 const s5 = require('./s5');
 const logger = require('./logger');
+const { exists } = require('../utils/fs');
 
-/*
-| Backend routing, decided by visibility: public -> S5 (content addressed,
-| impossible to retract), premium -> s3d (private/ prefix, real delete).
-|
-| Not an optimisation. A CID *is* the permission, so paywalling content
-| addressed media is not possible. Two guards fall out of that: a public file
-| can never become premium (media.js refuses it), and the scanner runs stricter
-| thresholds for S5 (processor.js).
-*/
+// Backend routing by visibility: public -> S5 (content addressed, impossible
+// to retract), premium -> s3d (private/ prefix, real delete). A CID is the
+// permission, so content-addressed media can never be paywalled -- media.js
+// refuses to make a public file premium, and processor.js scans S5 stricter.
 
 // Per-slot: a video and its thumbnail are separate objects and one can fail
 // without the other. Sharing a key left deleted videos' thumbnails live.
@@ -51,15 +47,9 @@ function isImmutable({ mediaType, visibility = 'public' }) {
   return backendFor({ mediaType, visibility }) === 's5';
 }
 
-// The CID a client may be shown. It is the decentralised handle for the bytes:
-// anyone holding it can fetch and verify them from any S5 node, forever, with
-// no route back. Only public media ever reaches S5, so this should always be
-// null for premium — but the paywall is re-checked here anyway rather than
-// trusted from three separate callers.
+// Null unless S5_EXPOSE_CID: a CID handed to a client can be fetched from any
+// S5 node forever with no route back, so exposing it can't be undone later.
 function publicCid(job) {
-  // Off until we choose to tell users their media is on Sia at all. Flipping it
-  // on is one env var; what it cannot do is be taken back, so it stays a
-  // deliberate decision rather than a default.
   if (!config.S5_EXPOSE_CID) return null;
   if (!job || job.visibility === 'private') return null;
   return job.s5_cid || null;
@@ -71,16 +61,14 @@ function s3dServing() {
   return sia.enabled() && !!config.SIA_PUBLIC_BASE_URL;
 }
 
-// Our own hostname, ULID in the path. Resolved in routes/cdn.js.
 function publicUrl(backend, kind, file) {
   if (backend === 's5') return `${config.MEDIA_CDN_BASE_URL}/${kind}/${file}`;
   if (backend === 's3d' && s3dServing()) return `${config.SIA_PUBLIC_BASE_URL}/${kind}/${file}`;
   return null;
 }
 
-// `url` is null when the caller should keep its local one; `patch` is merged
-// into the job either way. A backend failure is never fatal: the local file is
-// already written, so we fall back to it and let the boot sweep retry.
+// `url` null means caller keeps its local one; a backend failure is never
+// fatal since the local file is already written and the boot sweep retries.
 async function publish({
   id, kind, mediaType, file, filePath, visibility = 'public', slot = 'main',
 }) {
@@ -133,15 +121,13 @@ async function publish({
   }
 }
 
-// Durability only: the URL already in serey-api is left alone.
 async function retry(id, { force = false } = {}) {
   const job = await jobs.get(id);
   if (!job) return;
 
   for (const slot of ['main', 'thumb']) {
     const fields = SLOTS[slot];
-    // force is for the verify script: a slot it found missing or wrong is
-    // 'published', which is exactly the state this would otherwise skip.
+    // force is for the verify script, retrying an already-'published' slot it found wrong.
     if (!force && job[fields.state] !== 'failed') continue;
     if (force && !job[fields.state]) continue;
 
@@ -152,7 +138,6 @@ async function retry(id, { force = false } = {}) {
       : localPathFor(job, file);
     if (!filePath) continue;
 
-    // Nothing to re-upload, so terminate instead of spinning every boot.
     // eslint-disable-next-line no-await-in-loop
     if (!(await exists(filePath))) {
       // eslint-disable-next-line no-await-in-loop
@@ -171,23 +156,12 @@ async function retry(id, { force = false } = {}) {
       mediaType: job.media_type,
       file,
       filePath,
-      // Always public, even for premium video.
       visibility: slot === 'thumb' ? 'public' : job.visibility || 'public',
       slot,
     });
-    // Durability fields only; `url` is deliberately discarded.
     // eslint-disable-next-line no-await-in-loop
     await jobs.update(id, patch);
     logger.info({ id, slot, state: patch[fields.state] }, 'publish retry finished');
-  }
-}
-
-async function exists(p) {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -196,7 +170,6 @@ function kindFor(mediaType) {
   return KINDS[mediaType] || 'videos';
 }
 
-// Returns null rather than throwing, so one bad record cannot abort a sweep.
 function fileFromJob(job) {
   if (!job || !job.url) return null;
   try {
@@ -206,7 +179,6 @@ function fileFromJob(job) {
   }
 }
 
-// Mirrors the dir choice made in processor.
 function localPathFor(job, file) {
   const priv = job.visibility === 'private';
   switch (job.media_type) {
@@ -239,13 +211,11 @@ function recoverOnBoot() {
   });
 }
 
-/*
-| Per-slot report, not a boolean: s3d 'deleted' is really gone, while S5 manages
-| 'unpinned' at best ('disabled' by default) and any node that already fetched
-| the blob can serve it forever. Callers must not conflate the two.
-|
-| Never throws — a delete must succeed locally even if a backend is down.
-*/
+// Per-slot report, not a boolean: s3d 'deleted' is really gone, but S5 has no
+// unpin route (only an abstract unpinHash), so its delete is best effort --
+// 'unpinned' at best, 'disabled' by default, and any node that already
+// fetched the blob can keep serving it forever. Never throws: a local delete
+// must succeed even if a backend is down.
 async function purge(job) {
   const report = {};
   if (!job) return report;
@@ -255,9 +225,7 @@ async function purge(job) {
     const cid = job[fields.cid];
     const key = job[fields.key];
 
-    // Both identifiers are acted on, not just the first: a job re-routed
-    // between backends keeps the old one, and skipping it left that copy live
-    // after a takedown.
+    // Both identifiers are acted on -- a job re-routed between backends keeps the old one.
     const done = [];
 
     if (cid) {

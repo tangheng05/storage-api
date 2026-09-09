@@ -88,7 +88,7 @@ async function main() {
 
   console.log(`checked ${tracked.length} tracked object(s): ${ok} ok, ${problems.length} problem(s)`);
   if (untracked.length) {
-    console.log(`${untracked.length} ready job(s) are on no backend (failed, or predate it — run sia-backfill.js)`);
+    console.log(`${untracked.length} ready job(s) are on no backend (failed, or predate it — run storage-backfill.js)`);
   }
   problems.forEach((p) => console.log(`  ${p.id}  ${p.key}  ${p.issue}`));
 

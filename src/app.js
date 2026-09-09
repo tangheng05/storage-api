@@ -6,9 +6,7 @@ const pinoHttp = require('pino-http');
 const config = require('./config');
 const logger = require('./services/logger');
 const tusServer = require('./tus');
-const videosRouter = require('./routes/videos');
-const audioRouter = require('./routes/audio');
-const imagesRouter = require('./routes/images');
+const uploadsRouter = require('./routes/uploads');
 const mediaRouter = require('./routes/media');
 const cdnRouter = require('./routes/cdn');
 const blobRouter = require('./routes/blob');
@@ -21,30 +19,26 @@ app.set('trust proxy', config.TRUST_PROXY_HOPS);
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
 
-// S5's blob store, mounted ahead of the origin allowlist and with its own
-// permissive CORS. These bytes are addressed by hash and are meant to be
-// fetched by S5 clients we do not control — including browser ones, on origins
-// that are not ours. S5's own S3 store sets AllowedOrigin '*' on the bucket for
-// exactly this reason, so refusing unknown origins here would defeat the point.
+// Mounted ahead of the origin allowlist, with its own permissive CORS: these
+// bytes are fetched by S5 peers we do not control, including browsers on
+// origins that are not ours.
 app.use('/blob', cors({ origin: true, methods: ['GET', 'HEAD'], maxAge: 86400 }), blobRouter);
 
-// ALLOWED_ORIGINS entries may be exact origins, wildcard-subdomain patterns
-// ("https://*.serey.io"), or "*" for any origin. Communities live on many
-// subdomains (bookclub.serey.io, khmer.serey.io, ...), so exact-only broke them.
+// Entries may be exact origins, "https://*.<suffix>" wildcard subdomains (communities
+// live on many subdomains), or "*".
 const originAllowed = (origin) =>
   config.ALLOWED_ORIGINS.some((pattern) => {
     if (pattern === '*') return true;
     if (pattern.startsWith('https://*.')) {
-      const suffix = pattern.slice('https://*'.length); // ".serey.io"
+      const suffix = pattern.slice('https://*'.length);
       return origin.startsWith('https://') && origin.endsWith(suffix)
         && !origin.slice('https://'.length, -suffix.length).includes('/');
     }
     return origin === pattern;
   });
 
-// Hard-reject disallowed browser origins before anything else — the cors
-// package only omits headers on deny, and @tus/server's built-in CORS would
-// otherwise reflect any origin on the /files routes.
+// Hard-reject before anything else: the cors package only omits headers on
+// deny, and @tus/server's built-in CORS would otherwise reflect any origin.
 app.use((req, res, next) => {
   const { origin } = req.headers;
   if (origin && !originAllowed(origin)) {
@@ -85,8 +79,7 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Rate-limit new upload creations per IP. PATCH/HEAD are exempt so
-// resumes and chunk traffic are never throttled.
+// PATCH/HEAD are exempt so resumes and chunk traffic are never throttled.
 const createLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: config.CREATES_PER_HOUR,
@@ -101,12 +94,10 @@ app.all('/files', (req, res) => tusServer.handle(req, res));
 app.all('/files/*', (req, res) => tusServer.handle(req, res));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-// Signed delivery + visibility changes for paywalled media. Mounted before the
-// static fallbacks so nothing under /media is ever served unauthenticated.
+// Mounted before the static fallbacks so nothing under /media is served unauthenticated.
 app.use('/media', express.json({ limit: '8kb' }), mediaRouter);
-// NPM forwards /moderation straight here with nothing in front of it, so the
-// key check is the only barrier — rate limit it rather than leave an unbounded
-// 401-vs-200 oracle.
+// NPM forwards /moderation straight here, so the key check is the only
+// barrier -- rate limit against a 401-vs-200 oracle.
 const moderationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 100,
@@ -115,12 +106,11 @@ const moderationLimiter = rateLimit({
   message: { error: 'Too many requests' },
 });
 app.use('/moderation', moderationLimiter, express.json({ limit: '8kb' }), moderationRouter);
-// ULID -> CID resolver for public media on S5.
 app.use('/cdn', cdnRouter);
 
-app.use('/videos', videosRouter);
-app.use('/audio', audioRouter);
-app.use('/images', imagesRouter);
+app.use('/videos', uploadsRouter('videos'));
+app.use('/audio', uploadsRouter('audio'));
+app.use('/images', uploadsRouter('images'));
 
 // Local/dev fallback: in production nginx serves these directly from disk.
 app.use('/videos', express.static(config.VIDEOS_DIR, { immutable: true, maxAge: '365d' }));

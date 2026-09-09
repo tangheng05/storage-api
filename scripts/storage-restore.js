@@ -1,13 +1,8 @@
 #!/usr/bin/env node
-/*
-| Pull files back down from a backend to local disk. This is the disaster path, and it
-| is the only thing that proves the backup is real. Exercise it at least once
-| before trusting any of this.
-|
-|   node scripts/storage-restore.js <ULID>        # one file
-|   node scripts/storage-restore.js --all-missing # everything absent from disk
-|   node scripts/storage-restore.js --all-missing --dry-run
-*/
+// The disaster path: pulls files back from a backend to local disk. Exercise
+// it at least once -- it's the only thing that proves the backup is real.
+//   node scripts/storage-restore.js <ULID>        # one file
+//   node scripts/storage-restore.js --all-missing [--dry-run]
 const fsp = require('fs/promises');
 const path = require('path');
 const config = require('../src/config');
@@ -15,6 +10,7 @@ const jobs = require('../src/services/jobs');
 const sia = require('../src/services/sia');
 const s5 = require('../src/services/s5');
 const mirror = require('../src/services/mirror');
+const { exists } = require('../src/utils/fs');
 
 const { localPathFor, fileFromJob } = mirror;
 
@@ -22,16 +18,6 @@ const args = process.argv.slice(2);
 const ALL = args.includes('--all-missing');
 const DRY = args.includes('--dry-run');
 const ID = args.find((a) => !a.startsWith('--'));
-
-
-const exists = async (p) => {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 async function restoreOne(job) {
   if (!job.sia_key && !job.s5_cid) {
@@ -50,15 +36,14 @@ async function restoreOne(job) {
     return true;
   }
 
-  // S5 restores verify themselves: the CID is the hash, so a corrupted
-  // download is detected rather than silently written over a good file.
+  // S5 restores verify themselves: the CID is the hash, so corruption is
+  // detected rather than silently overwriting a good file.
   const { bytes } = job.s5_cid
     ? await s5.getToFile({ cid: job.s5_cid, filePath })
     : await sia.getToFile({ key: job.sia_key, filePath });
   console.log(`  ${job.id}  restored ${bytes} bytes -> ${filePath}`);
 
-  // The thumbnail is a separate object; without this a restored video comes
-  // back posterless and unrecoverable.
+  // Thumbnail is a separate object; skip it and the video comes back posterless.
   if (job.s5_thumb_cid || job.sia_thumb_key) {
     const thumbPath = path.join(config.THUMBS_DIR, `${job.id}.jpg`);
     try {
@@ -78,7 +63,7 @@ async function main() {
     process.exit(2);
   }
   if (!ID && !ALL) {
-    console.error('Usage: sia-restore.js <ULID> | --all-missing [--dry-run]');
+    console.error('Usage: storage-restore.js <ULID> | --all-missing [--dry-run]');
     process.exit(2);
   }
 

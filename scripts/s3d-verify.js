@@ -1,19 +1,10 @@
 #!/usr/bin/env node
-/*
-| Does s3d give back the bytes S5 put in?
-|
-|   AK=<access> SK=<secret> node scripts/s3d-verify.js <published-file>
-|
-| The S5 node fetches a blob from its store and verifies the BLAKE3 hash
-| against the CID. Against s3d that fails with "Integrity verification failed",
-| which has exactly two explanations: s3d returns different bytes, or the node's
-| read path is broken. This tells them apart by fetching the object itself and
-| hashing it.
-|
-| The object key is base64url(0x1f || hash) under a "1/" prefix -- the same
-| encoding S5 sends as tus metadata, which is how we know the write used the
-| right hash.
-*/
+// Does s3d give back the bytes S5 put in? Against s3d, the node's hash-vs-CID
+// check fails with "Integrity verification failed" -- either s3d returns
+// wrong bytes, or the node's read path is broken. Fetches the object directly
+// and hashes it to tell the two apart. Key = base64url(0x1f || hash) under
+// "1/", the same encoding S5 sends as tus metadata.
+//   AK=<access> SK=<secret> node scripts/s3d-verify.js <published-file>
 const fs = require('fs');
 const { blake3 } = require('@noble/hashes/blake3');
 const { S3Client, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');

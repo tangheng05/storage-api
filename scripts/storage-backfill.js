@@ -1,16 +1,12 @@
 #!/usr/bin/env node
 /*
-| Push already-published media onto a storage backend.
+| Push already-published media onto a storage backend. The boot sweep only
+| retries publishes that *failed*, so anything predating a backend stays
+| 'skipped' forever -- this closes that gap. Durability only: the URL already
+| in serey-api is left alone, since the local file it points at is still correct.
 |
 |   node scripts/storage-backfill.js --dry-run
 |   node scripts/storage-backfill.js --type video --limit 50
-|
-| The boot sweep only retries publishes that *failed*, so anything predating a
-| backend stays 'skipped' forever — the day video is added, every existing video
-| would go unbacked. This closes that gap.
-|
-| Durability only: the URL already in serey-api is left alone, since the local
-| file it points at is still correct.
 */
 const fsp = require('fs/promises');
 const path = require('path');
@@ -19,6 +15,7 @@ const jobs = require('../src/services/jobs');
 const mirror = require('../src/services/mirror');
 const sia = require('../src/services/sia');
 const s5 = require('../src/services/s5');
+const { exists } = require('../src/utils/fs');
 
 const args = process.argv.slice(2);
 const DRY = args.includes('--dry-run');
@@ -28,15 +25,6 @@ const flag = (name, fallback) => {
 };
 const ONLY_TYPE = flag('--type', null);
 const LIMIT = parseInt(flag('--limit', '0'), 10) || Infinity;
-
-const exists = async (p) => {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 async function main() {
   if (!sia.enabled() && !s5.enabled()) {
@@ -96,8 +84,7 @@ async function main() {
       await jobs.update(job.id, patch);
       const state = patch[mirror.SLOTS.main.state];
 
-      // A video's thumbnail is a separate object on a separate slot. Skipping it
-      // meant a restore brought back every video and no posters.
+      // Thumbnail is a separate object/slot; skip it and restores come back posterless.
       const thumbFile = `${job.id}.jpg`;
       const thumbPath = path.join(config.THUMBS_DIR, thumbFile);
       // eslint-disable-next-line no-await-in-loop

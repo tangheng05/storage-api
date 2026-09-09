@@ -5,15 +5,10 @@ const path = require('path');
 const config = require('../config');
 const logger = require('./logger');
 
-/*
-| Sia s3d via the ordinary S3 SDK. No Sia-specific client because
-| @siafoundation/indexd-js ships API bindings only, with no upload or download.
-|
-| Keys mirror the on-disk layout: <visibility>/<kind>/<ULID>.<ext>. Keeping the
-| ULID means serey-api's id derivation and delete-by-id keep working; keeping
-| public/ and private/ apart means a future public gateway can be scoped to
-| public/ alone instead of exposing every paywalled file in the bucket.
-*/
+// Sia s3d via the ordinary S3 SDK -- @siafoundation/indexd-js ships API
+// bindings only, no upload/download. Keys mirror the on-disk layout:
+// <visibility>/<kind>/<ULID>.<ext>, keeping public/ and private/ apart so a
+// future public gateway can be scoped to public/ alone.
 
 let client = null;
 let Upload = null;
@@ -29,12 +24,9 @@ function enabled() {
   );
 }
 
-/*
-| Every s3d quirk the SDK needs lives here, because two callers now need a
-| client against the same gateway with different credentials: this module for
-| the premium mirror, and s5blob.js for S5's public blobs. s3d scopes buckets to
-| the user that created them, so they cannot share one key.
-*/
+// Every s3d quirk the SDK needs lives here: two callers (this module and
+// s5blob.js) need a client against the same gateway with different
+// credentials, since s3d scopes buckets to the user that created them.
 function buildClient({ endpoint, accessKeyId, secretAccessKey }) {
   // eslint-disable-next-line global-require
   const { S3Client } = require('@aws-sdk/client-s3');
@@ -46,8 +38,6 @@ function buildClient({ endpoint, accessKeyId, secretAccessKey }) {
     credentials: { accessKeyId, secretAccessKey },
     // s3d addresses buckets by path, not by DNS subdomain.
     forcePathStyle: true,
-    // The SDK ships no request timeout at all, and the publish lane is
-    // concurrency 1, so one hung socket would stall everything behind it.
     requestHandler: new NodeHttpHandler({
       connectionTimeout: config.SIA_S3_CONNECT_TIMEOUT_MS,
       requestTimeout: config.SIA_S3_REQUEST_TIMEOUT_MS,
@@ -98,9 +88,7 @@ async function putFile({ key, filePath }) {
   if (!enabled()) throw new Error('sia_not_configured');
   const { size } = await fsp.stat(filePath);
 
-  // Must run before Upload is referenced: it is what populates the binding.
-  // `new Upload(...)` resolves the callee first, so inlining this below would
-  // read Upload while it is still null.
+  // Must run before `new Upload(...)` resolves the callee, or Upload is still null.
   const s3 = getClient();
   const upload = new Upload({
     client: s3,
@@ -117,7 +105,7 @@ async function putFile({ key, filePath }) {
   return { key, bytes: size };
 }
 
-// null when absent. Proves the backup is present, not merely recorded.
+// null when absent -- proves the backup is present, not merely recorded.
 async function headObject(key) {
   if (!enabled()) throw new Error('sia_not_configured');
   try {
@@ -131,7 +119,6 @@ async function headObject(key) {
   }
 }
 
-// Pull an object back down to disk. This is the disaster path.
 async function getToFile({ key, filePath }) {
   if (!enabled()) throw new Error('sia_not_configured');
   const out = await getClient().send(

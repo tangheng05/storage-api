@@ -34,8 +34,8 @@ const ALLOWED_AUDIO_TYPES = [
 ];
 const ALLOWED_AUDIO_EXT = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac'];
 
-// What sharp's bundled libvips decodes, minus BMP (not in the prebuilt libvips)
-// and SVG (rasterising untrusted SVG is an attack surface).
+// What sharp's bundled libvips decodes, minus BMP and SVG (rasterising
+// untrusted SVG is an attack surface).
 const ALLOWED_IMAGE_TYPES = [
   'image/jpeg',
   'image/jpg',
@@ -44,7 +44,6 @@ const ALLOWED_IMAGE_TYPES = [
   'image/gif',
   'image/tiff',
   'image/avif',
-  // iPhone default since iOS 11; libvips decodes these natively.
   'image/heic',
   'image/heif',
   'image/heic-sequence',
@@ -72,9 +71,7 @@ const tusServer = new Server({
   async onIncomingRequest(req, res, uploadId) {
     if (req.method === 'OPTIONS') return;
     if (isAuthorized(req)) return;
-    // POST has no uploadId and always needs the master key. PATCH/HEAD may
-    // instead present the scoped token from creation, so a browser can send
-    // chunks without ever holding the master key.
+    // PATCH/HEAD may present the scoped token from creation instead of the master key.
     if (uploadId) {
       const job = await jobs.get(uploadId);
       if (job && job.state === 'uploading' && matchesUploadToken(req, job.upload_token)) {
@@ -102,16 +99,14 @@ const tusServer = new Server({
     let mediaType = 'video';
     if (isAudio) mediaType = 'audio';
     if (isImage) mediaType = 'image';
-    // Enforced here, before a byte is sent: the store's global maxSize is
-    // sized for video.
+    // Enforced here, before a byte is sent: the store's global maxSize is sized for video.
     if (isImage && upload.size > config.MAX_IMAGE_BYTES) {
       throw {
         status_code: 413,
         body: `Image too large (max ${Math.floor(config.MAX_IMAGE_BYTES / (1024 * 1024))}MB)`,
       };
     }
-    // Remux/transcode needs ~2x the file size transiently. Checked against the
-    // pending dir, where conversion output actually lands.
+    // Remux/transcode needs ~2x the file size transiently, checked against the pending dir.
     let publishDir = config.PENDING_VIDEOS_DIR;
     if (isAudio) publishDir = config.PENDING_AUDIO_DIR;
     if (isImage) publishDir = config.PENDING_IMAGES_DIR;
@@ -128,12 +123,10 @@ const tusServer = new Server({
       filetype: meta.filetype,
       size: upload.size,
       upload_token: uploadToken,
-      // Verified by the trusted caller; DELETE enforces it via x-delete-owner.
       owner: meta.owner || null,
-      // Declared up front because the choice is permanent for public media:
-      // it goes to S5, whose CIDs cannot be revoked, so it can never become
-      // premium later (media.js refuses that flip). Declaring private here
-      // skips S5 for s3d instead.
+      // Permanent for public media: it goes to S5, whose CIDs cannot be
+      // revoked, so it can never become premium later (media.js refuses
+      // that flip).
       visibility: meta.visibility === 'private' ? 'private' : 'public',
     });
     res.setHeader('X-Upload-Token', uploadToken);

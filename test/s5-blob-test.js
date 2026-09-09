@@ -1,15 +1,10 @@
 #!/usr/bin/env node
 /*
-| S5 blob route test. No framework: node test/s5-blob-test.js
-|
-| Drives src/routes/blob.js and src/services/s5blob.js against an in-process S3
-| stub, standing in for s3d. What it is really proving is that we serve the
-| shape S5 asks for: the `1/<hash>` key, the `.obao` sibling it derives by
-| appending to that same URL, the 256KB ranged reads it does for anything over
-| that size, and that a browser on someone else's origin is not turned away.
-|
-| It does NOT prove s3d behaves this way, and it does not prove the S5 node is
-| happy. Only a live node with cdnUrls set can do that.
+| S5 blob route test: node test/s5-blob-test.js (no framework). Drives
+| src/routes/blob.js and src/services/s5blob.js against an in-process S3 stub
+| standing in for s3d, proving we serve the shape S5 asks for -- the `1/<hash>`
+| key, the `.obao` sibling, 256KB ranged reads, and cross-origin access. It
+| does NOT prove s3d behaves this way, or that a live S5 node is happy.
 */
 const http = require('http');
 const assert = require('assert');
@@ -114,7 +109,6 @@ async function main() {
   check('the .obao sibling is served from the same path shape', obao.status === 200);
   check('outboard is byte-identical', obao.body.equals(OBAO));
 
-  // The read S5 actually performs on anything larger than one chunk.
   const ranged = await request(appPort, `/blob/1/${HASH}`, {
     headers: { range: 'bytes=0-262143' },
   });
@@ -140,7 +134,6 @@ async function main() {
   const missing = await request(appPort, `/blob/1/${'z'.repeat(44)}`);
   check('an unknown blob is 404, not a 502', missing.status === 404);
 
-  // The prefix is fixed in the route, so a name can never reach another key.
   const traversal = await request(appPort, '/blob/1/..%2F..%2Fprivate%2Fvideos%2Fsecret.mp4');
   check('a traversal attempt is refused', traversal.status === 400);
   const dotted = await request(appPort, `/blob/1/${HASH}.jpg`);

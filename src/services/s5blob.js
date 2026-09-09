@@ -1,21 +1,11 @@
 const config = require('../config');
 const { buildClient } = require('./sia');
 
-/*
-| Reads S5's blobs back out of s3d.
-|
-| S5's S3 store serves every read through a presigned URL (lib/store/s3.dart,
-| provide()). s3d authenticates on the Authorization header alone: a
-| query-signed request carries none, so it is treated as anonymous, and its Sia
-| backend refuses anonymous reads outright. Every S5 read of an s3d-backed blob
-| therefore 403s, and the node reports "integrity verification failed" because
-| it hashes the error body. Pointing cdnUrls at our own route switches provide()
-| to a plain URL and puts the signing here instead.
-|
-| Its own client rather than the mirror's: premium can keep s3d switched off
-| entirely, and s3d scopes buckets to the user that created them, so S5's bucket
-| needs the key S5 itself uses.
-*/
+// Reads S5's blobs back out of s3d. s3d authenticates on the Authorization
+// header alone, so S5's presigned query-signed reads land as anonymous and
+// get refused (reported as "integrity verification failed"); pointing cdnUrls
+// at our own route puts the signing here instead. Own client, not the
+// mirror's: s3d scopes buckets to the user that created them.
 
 let client = null;
 let commands = null;

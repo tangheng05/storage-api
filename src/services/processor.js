@@ -8,37 +8,22 @@ const image = require('./image');
 const mirror = require('./mirror');
 const scan = require('./scan');
 const logger = require('./logger');
+const { exists } = require('../utils/fs');
 
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
 const TRANSCODE_CODECS = ['hevc'];
 const WEBM_CODECS = ['vp8', 'vp9', 'av1'];
 
-/*
-| Two stages on two lanes: `convert` writes the published form into a PENDING
-| dir nothing serves, then `finalize` scans it and only on a clean verdict moves
-| it into a served dir and pushes it to a backend.
-|
-| The gate is at publication, not at the storage push: exposure comes from
-| serving the bytes, local disk included.
-*/
+// Two stages on two lanes: `convert` writes the published form into a PENDING
+// dir nothing serves; `finalize` scans it and only on a clean verdict moves it
+// into a served dir. The gate is at publication, not the storage push --
+// exposure comes from serving the bytes, local disk included.
 
 function tusFilePath(id) {
   return path.join(config.TUS_DIR, id);
 }
 
-async function exists(p) {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Two accommodations publishCleared depends on: idempotent, so a retry after a
-// partial publish finds the file already at dest rather than throwing; and a
-// copy fallback, because the pending and published dirs are separate env vars
-// and may sit on different mounts.
+// Idempotent (retry finds the file already at dest); copy fallback since pending/published dirs may differ mounts.
 async function move(from, to) {
   try {
     await fsp.rename(from, to);
@@ -66,8 +51,7 @@ function finalDirFor(mediaType, visibility) {
   return priv ? config.PRIVATE_VIDEOS_DIR : config.VIDEOS_DIR;
 }
 
-// A corrupt input fails identically both times, but a transient hiccup should
-// not permanently fail a fully-uploaded video.
+// A transient ffmpeg hiccup shouldn't permanently fail a fully-uploaded video.
 async function withOneRetry(id, fn) {
   try {
     await fn();
@@ -91,8 +75,7 @@ async function convertVideo(id, src, probe) {
     throw Object.assign(new Error('invalid_duration'), { code: 'invalid_duration' });
   }
 
-  // webm passes through, h264 is remuxed losslessly, hevc is transcoded so it
-  // plays outside Safari.
+  // webm passes through, h264 is remuxed losslessly, hevc transcoded for Safari.
   const codec = videoStream.codec_name;
   const isWebm = WEBM_CODECS.includes(codec) && (probe.format.format_name || '').includes('webm');
   const needsTranscode = TRANSCODE_CODECS.includes(codec);
@@ -110,8 +93,7 @@ async function convertVideo(id, src, probe) {
   }
   await fsp.rename(tmpPath, pendingPath);
 
-  // Doubles as the scanner's view of the video: a still frame is all an image
-  // classifier can rule on, and it is the frame the feed shows anyway.
+  // Doubles as the scanner's view of the video -- all an image classifier can rule on.
   const thumbFile = `${id}.jpg`;
   const thumbPath = path.join(config.PENDING_THUMBS_DIR, thumbFile);
   let hasThumb = true;
@@ -149,9 +131,7 @@ async function convertAudio(id, src, probe) {
 }
 
 async function convertImage(id, src, meta) {
-  // jpeg, png and webp keep the extension they arrived with; anything else
-  // becomes webp. Decided before the write so the temp file and the final name
-  // cannot disagree.
+  // Extension decided before the write so the temp file and final name agree.
   const ext = image.extensionFor(meta);
   const pendingPath = path.join(config.PENDING_IMAGES_DIR, `${id}${ext}`);
   const tmpPath = path.join(config.PENDING_IMAGES_DIR, `.${id}.tmp${ext}`);
@@ -184,8 +164,7 @@ async function discardPending(job) {
   ].filter(Boolean));
 }
 
-// Video scans via its thumbnail: catches an opening frame, misses one that
-// turns bad later. Frame sampling is the upgrade path.
+// Video scans via its thumbnail (misses a frame that turns bad later); withSampledFrames below is the upgrade path.
 async function runScan(id, job) {
   const p = pendingPaths(job);
   if (job.media_type === 'audio') {
@@ -195,20 +174,14 @@ async function runScan(id, job) {
   const isVideo = job.media_type === 'video';
   const target = isVideo ? p.thumb : p.file;
 
-  // The threshold follows the bytes being scanned, not the job. For video that
-  // is the thumbnail, which always publishes public — so it can land on S5 even
-  // when the video itself goes to s3d.
+  // Threshold follows the bytes scanned, not the job -- a video's thumbnail always publishes public.
   const visibility = isVideo ? 'public' : job.visibility || 'public';
   const immutable = mirror.isImmutable({ mediaType: job.media_type, visibility });
 
   if (!target || !(await exists(target))) {
-    // An image with no file is a broken job and should fail. A video with no
-    // thumbnail is different: ffmpeg is allowed to fail on one, and treating
-    // that as clean let an uploader skip the gate with a file whose frames do
-    // not decode. With nobody to hand it to, refusing is the only honest answer:
-    // publishing an unscanned video would put the one file the gate could not
-    // read on the far side of the gate. Throwing instead would park it in
-    // 'scanning' and retry the same missing frame hourly, forever.
+    // Image with no file: broken job, fail it. Video with no thumbnail: reject
+    // rather than treat as clean (an uploader-controlled bypass of the gate)
+    // or throw (would just retry the same undecodable frame forever).
     if (!isVideo) {
       throw Object.assign(new Error('no_scan_target'), { code: 'no_scan_target' });
     }
@@ -223,14 +196,8 @@ async function runScan(id, job) {
   return withSampledFrames(id, job, result, immutable);
 }
 
-/*
-| Scan a few more frames spread across the video and keep the worst verdict.
-|
-| One thumbnail only ever proves something about the opening seconds. This does
-| not make video scanning complete — nothing short of every frame would — but it
-| catches the obvious case of a clean intro over bad content. Costs one
-| classifier call per extra frame, so SCAN_VIDEO_FRAMES defaults to 1.
-*/
+// Scans a few more frames, keeps the worst verdict -- catches a clean intro
+// over bad content; costs one call/frame, so SCAN_VIDEO_FRAMES defaults to 1.
 async function withSampledFrames(id, job, primary, immutable) {
   const extra = Math.max(0, config.SCAN_VIDEO_FRAMES - 1);
   const duration = job.duration_sec || 0;
@@ -250,8 +217,7 @@ async function withSampledFrames(id, job, primary, immutable) {
       const r = await scan.scanFile({ filePath: framePath, mediaType: 'video', immutable });
       if (rank[r.verdict] > rank[worst.verdict]) worst = r;
     } catch (err) {
-      // A frame that will not decode is not a verdict. The primary thumbnail
-      // already gave us one.
+      // Undecodable frame isn't a verdict; the primary thumbnail already gave us one.
       logger.warn({ id, at, err: err.message }, 'frame scan skipped');
     } finally {
       // eslint-disable-next-line no-await-in-loop
@@ -264,8 +230,8 @@ async function withSampledFrames(id, job, primary, immutable) {
   return { ...worst, phash: primary.phash };
 }
 
-// Local move first, so the file is where mirror.localPathFor expects it and a
-// backend failure leaves a correct local file rather than a half-published job.
+// Local move first: a backend failure then leaves a correct local file rather
+// than a half-published job.
 async function publishCleared(id, job) {
   const visibility = job.visibility || 'public';
   const kind = mirror.kindFor(job.media_type);
@@ -279,8 +245,7 @@ async function publishCleared(id, job) {
 
   let thumbPath = null;
   if (job.pending_thumb) {
-    // Always public, even for premium video: a locked card still shows its
-    // poster.
+    // Always public, even for premium video -- a locked card still shows its poster.
     thumbPath = path.join(config.THUMBS_DIR, job.pending_thumb);
     await fsp.mkdir(config.THUMBS_DIR, { recursive: true });
     await move(p.thumb, thumbPath);
@@ -332,9 +297,7 @@ async function finalize(id) {
   const job = await jobs.get(id);
   if (!job || !job.pending_file) return;
 
-  // Breaks the loop a partially-failed publish would otherwise cause: with no
-  // bytes there is nothing to scan, and re-running would synthesize a verdict
-  // for a file that is not there.
+  // No bytes, nothing to scan -- avoids re-running and synthesizing a verdict for a missing file.
   if (!(await exists(pendingPaths(job).file))) {
     await jobs.update(id, {
       state: 'failed',
@@ -348,14 +311,14 @@ async function finalize(id) {
 
   let scanError = null;
   let result;
-  // Only the scan is guarded. A publish failure must not be recorded as a
-  // scanner outage, and must not re-enter this branch and publish a second time.
+  // Only the scan call is inside the try: a publish failure must not be
+  // recorded as a scanner outage, nor re-enter this branch and publish twice.
   try {
     result = await runScan(id, job);
   } catch (err) {
     if (scan.enabled() && !config.SCAN_FAIL_OPEN) {
-      // An outage that delays uploads is cheaper than one bad file going live
-      // on a backend that cannot retract it.
+      // An outage that delays uploads is cheaper than a bad file going live on
+      // a backend that cannot retract it.
       await jobs.update(id, { state: 'scanning', scan_error: err.message });
       logger.error({ id, err: err.message }, 'scan failed, holding upload (fail closed)');
       return;
@@ -368,10 +331,8 @@ async function finalize(id) {
   const patch = {
     scan_verdict: result.verdict,
     scan_provider: result.provider,
-    // Which providers answered, not just which one won. A clean result names
-    // only the first, so without this there is no way to tell from a job
-    // whether the classifier ran — and an absent classifier looks identical to
-    // a clean platform.
+    // Which providers answered, not just which won -- otherwise an absent
+    // classifier looks identical to a clean one.
     scan_providers: result.providers || (result.provider ? [result.provider] : []),
     scan_score: result.score,
     scan_labels: result.labels,
@@ -381,8 +342,7 @@ async function finalize(id) {
     scanned_at: new Date().toISOString(),
   };
 
-  // The verdict is persisted before it is acted on, so a failure while acting
-  // cannot be mistaken for a failure to decide.
+  // Verdict persisted before acted on, so a failure while acting isn't mistaken for a failure to decide.
   if (result.verdict === scan.VERDICT.REJECT) {
     await jobs.update(id, {
       ...patch, state: 'rejected', error: 'rejected_by_scan',
@@ -394,8 +354,8 @@ async function finalize(id) {
   }
 
   await jobs.update(id, patch);
-  // Outside the scan guard on purpose. A throw here leaves the job in
-  // 'scanning' for the boot sweep to retry, and publishCleared is idempotent.
+  // Outside the scan guard on purpose: a throw here leaves the job in
+  // 'scanning' for the boot sweep to retry (publishCleared is idempotent).
   await publishCleared(id, job);
 }
 
@@ -429,8 +389,7 @@ async function convert(id) {
     }
 
     // State first: a crash between deleting the source and recording the new
-    // state left a converted job looking unprocessed, and recovery then failed
-    // it for a source that was already gone.
+    // state left recovery retrying a source that was already gone.
     await jobs.update(id, {
       state: 'scanning',
       filename: (job && job.filename) || null,
@@ -447,14 +406,14 @@ async function convert(id) {
   }
 }
 
-// media_type picks the lane. Passed in rather than read, so this stays sync.
+// mediaType passed in rather than read from the job, so this stays sync.
 function enqueue(id, mediaType) {
   const lane = mediaType === 'image' ? queue.IMAGE_LANE : queue.MEDIA_LANE;
   queue.push(() => convert(id), lane);
 }
 
-// Re-runs the gate for anything still held by a scan error. Called on boot and
-// on the hourly timer, so a scanner that recovers mid-day needs no restart.
+// Re-runs the gate for anything held by a scan error; called on boot and the
+// hourly timer, so a scanner that recovers mid-day needs no restart.
 function sweepHeld() {
   jobs
     .listByState(['scanning'])
@@ -465,8 +424,7 @@ function sweepHeld() {
 
 // 'uploading' is left to tus, which owns its own resumption.
 function recoverOnBoot() {
-  // Oldest first: readdir order is unspecified, and with a recovery cap an
-  // arbitrary subset would otherwise be retried forever while the rest starved.
+  // Oldest first, so a recovery cap doesn't starve older jobs behind an arbitrary subset.
   const oldestFirst = (a, b) => String(a.created_at).localeCompare(String(b.created_at));
 
   jobs.listByState(['queued', 'processing']).sort(oldestFirst).forEach((job) => {
@@ -474,10 +432,8 @@ function recoverOnBoot() {
     enqueue(job.id, job.media_type);
   });
 
-  // 'review' is a state nothing produces any more. Anything still parked in it
-  // predates the single-threshold gate and would otherwise sit there forever
-  // waiting for a queue that no longer exists, so it is re-decided instead. Its
-  // pending files were never discarded, so there is something to re-scan.
+  // 'review' is a legacy state predating the single reject-threshold gate;
+  // its pending files were never discarded, so re-decide instead of stalling forever.
   jobs
     .listByState(['scanning', 'review'])
     .sort(oldestFirst)

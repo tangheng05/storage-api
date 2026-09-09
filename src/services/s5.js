@@ -8,36 +8,15 @@ const { blake3 } = require('@noble/hashes/blake3');
 const config = require('../config');
 const logger = require('./logger');
 
-/*
-| S5 object store — public media only.
-|
-| A blob's CID is its BLAKE3 hash, so the same bytes always produce the same
-| identifier and a retry is idempotent. We compute it locally but prefer the CID
-| the node reports, because the documented byte layout turned out to be wrong
-| (see CID_MAGIC). The cost: tus needs the hash up front, so large files are
-| read twice.
-|
-| Publishing here cannot be undone. Premium media goes to s3d (sia.js), which
-| has a private prefix and a working delete.
-*/
+// S5 object store, public media only. Publishing cannot be undone; premium
+// media goes to s3d (sia.js) instead, which has a private prefix and delete.
 
-/*
-| Both constants come from a live s5-dart v0.14.1 node, NOT from the spec.
-|
-| docs.sfive.net says BLAKE3 is 0x1e and a blob CID is 0x5b 0x82 0x1e + hash +
-| size in base16 with an 'f' prefix. A real node uses 0x1f and returns 0x26 0x1f
-| + hash + size in base58btc with 'z'. The hash itself and the little-endian
-| size bytes match the spec exactly; only these two things differ.
-|
-| 0x1f is confirmed twice over: it is the byte in CIDs the node produces, and it
-| is the only prefix the node accepts in tus hash metadata. Both were found with
-| scripts/s5-probe-tus.js -- rerun it against a new node version before trusting
-| these again.
-|
-| putFile still prefers the CID the node reports, and stat() proves the object
-| is retrievable before any publish is reported, so a future format change fails
-| the upload instead of writing a dead URL into a post row.
-*/
+// Values come from a live s5-dart v0.14.1 node, NOT docs.sfive.net, which
+// documents BLAKE3 as 0x1e and a blob CID as 0x5b 0x82 0x1e + hash + size in
+// base16/'f'. A real node uses 0x1f and 0x26 0x1f + hash + size in base58btc/'z'.
+// Confirmed both as the CID byte the node emits and the only hash-metadata
+// prefix it accepts for tus (via scripts/s5-probe-tus.js) -- rerun that probe
+// against a new node version before trusting these again.
 const BLAKE3_MULTIHASH = 0x1f;
 const CID_BLOB_MAGIC = 0x26;
 const CID_MAGIC = [CID_BLOB_MAGIC, BLAKE3_MULTIHASH];
@@ -63,15 +42,8 @@ function enabled() {
   return config.S5_ENABLED && !!config.S5_NODE_URL && !!config.S5_AUTH_TOKEN;
 }
 
-/*
-| base58btc with multibase prefix 'z':
-|   byte 0-1  0x26 0x1f   magic (see CID_MAGIC)
-|   byte 2-33 the BLAKE3 hash
-|   byte 34+  size, little endian, trailing zero bytes trimmed
-|
-| The test pins this against a CID a real node returned. Keep it: nothing else
-| would catch an off-by-one, and the spec cannot be used as the reference.
-*/
+// base58btc('z' + CID_MAGIC + hash + little-endian size, trailing zeros trimmed);
+// pinned in tests against a CID a real node returned.
 function buildCid(hash, size) {
   const sizeBytes = [];
   let remaining = size;
@@ -109,7 +81,7 @@ async function request(url, init, timeoutMs = config.S5_TIMEOUT_MS) {
   }
 }
 
-// Under S5_SMALL_MAX_BYTES, which covers every published image and no video.
+// Below the configured limit (S5_SMALL_MAX_BYTES) -- every published image, no video.
 async function uploadSmall(filePath) {
   const buf = await fsp.readFile(filePath);
   const form = new FormData();
@@ -123,8 +95,7 @@ async function uploadSmall(filePath) {
   if (!res.ok) {
     throw new Error(`s5 upload failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
   }
-  // A real node answers { "cid": "z..." }. The spec documents no response body,
-  // so this is best effort — null just means fall back to the computed CID.
+  // Spec documents no response body; a real node answers { "cid": "z..." }.
   try {
     const body = await res.json();
     return typeof body?.cid === 'string' ? body.cid : null;
@@ -133,10 +104,9 @@ async function uploadSmall(filePath) {
   }
 }
 
-// The node will not hash for us, so it goes in the creation metadata, under the
-// key 'hash', as tus-base64 of base64url(0x1f || hash) -- encoded twice because
-// the inner value is what the node decodes and tus requires base64 metadata.
-// Found empirically; the spec's version is rejected with "Invalid hash found".
+// Hash goes in tus creation metadata as key 'hash', tus-base64 of
+// base64url(0x1f || hash) -- found empirically by probe; the spec's encoding
+// is rejected with "Invalid hash found".
 async function uploadTus(filePath, { size, hash }) {
   const raw = Buffer.concat([Buffer.from([BLAKE3_MULTIHASH]), Buffer.from(hash, 'hex')]);
   const hashValue = raw.toString('base64url');
@@ -155,8 +125,8 @@ async function uploadTus(filePath, { size, hash }) {
   }
   const location = create.headers.get('location');
   if (!location) throw new Error('s5 tus create returned no Location');
-  // Pinned to the node's origin: an absolute Location would otherwise send the
-  // bearer token and the file bytes to any host the node names.
+  // Pin to the node's origin -- an absolute Location could send the bearer
+  // token and file bytes to any host the node names.
   const target = new URL(location, config.S5_NODE_URL);
   if (target.origin !== new URL(config.S5_NODE_URL).origin) {
     throw new Error(`s5 tus Location left the node origin: ${target.origin}`);
@@ -184,11 +154,9 @@ async function uploadTus(filePath, { size, hash }) {
         throw new Error(`s5 tus patch failed at ${offset}: ${res.status}`);
       }
       const next = parseInt(res.headers.get('upload-offset'), 10);
-      // Trust the server's offset: if it accepted a short write, our own
-      // count would corrupt the blob.
+      // Trust the server's offset -- a short write would otherwise corrupt the blob.
       const advanced = Number.isFinite(next) ? next : offset + bytesRead;
-      // Without this a node echoing a stale offset loops forever, and putFile
-      // runs on a concurrency-1 lane, so it would block every other upload.
+      // Guards against a stale-offset loop, which would block the concurrency-1 upload lane.
       if (advanced <= offset) {
         throw new Error(`s5 tus made no progress at offset ${offset}`);
       }
@@ -201,8 +169,7 @@ async function uploadTus(filePath, { size, hash }) {
   if (offset !== size) {
     throw new Error(`s5 tus incomplete: sent ${offset} of ${size}`);
   }
-  // Nothing documents whether the final PATCH carries a CID. Ask the upload
-  // resource; a null just falls back to the computed one.
+  // Undocumented whether the final PATCH carries a CID; ask the upload resource.
   try {
     const head = await request(target, { method: 'HEAD', headers: authHeaders({ 'tus-resumable': '1.0.0' }) }, 30000);
     const cid = head.headers.get('x-s5-cid') || head.headers.get('upload-cid');
@@ -212,16 +179,10 @@ async function uploadTus(filePath, { size, hash }) {
   }
 }
 
-/*
-| Idempotent: the same bytes produce the same CID, so a retry re-uploads to the
-| same identifier rather than making a second object.
-|
-| The node's own CID wins when it gives one. Ours is a reconstruction of a
-| format the spec gets wrong, so it is the fallback, not the source of truth --
-| and either way stat() proves the object is really there before we report a
-| publish. Without that check a wrong CID becomes a permanently dead URL in a
-| serey-api post row.
-*/
+// Node's CID wins when given (spec's format is the unreliable one); stat()
+// still verifies retrievability before reporting success, because a node can
+// 204 a blob that never resolves, which would freeze a dead URL into a
+// serey-api post row.
 async function putFile({ filePath }) {
   if (!enabled()) throw new Error('s5_not_configured');
   const { cid: computed, hash, size } = await hashFile(filePath);
@@ -248,17 +209,10 @@ function downloadUrl(cid) {
   return `${base}/${cid}`;
 }
 
-/*
-| Fetch a blob for /cdn to stream on to the viewer.
-|
-| The download route needs the bearer token — anonymous requests 404, and
-| enabling [accounts] to open it up only moves the problem to an account-token
-| flow the docs do not specify. So the token stays here and we proxy, which also
-| means the node never has to be reachable from the internet.
-|
-| Range is forwarded so video seeking still works, and the caller gets the
-| upstream response untouched so it can mirror status and headers.
-*/
+// Proxies the blob for /cdn: the download route needs the bearer token
+// (anonymous requests 404), so this keeps the token server-side and the node
+// off the public internet. Range is forwarded for video seeking; response is
+// returned untouched so the caller can mirror status and headers.
 async function fetchBlob(cid, { range } = {}) {
   if (!enabled()) throw new Error('s5_not_configured');
   return request(downloadUrl(cid), {
@@ -267,9 +221,8 @@ async function fetchBlob(cid, { range } = {}) {
   });
 }
 
-// Ranged GET rather than HEAD: the docs do not commit to HEAD being supported.
-// The body is cancelled rather than read — a node that ignores Range would
-// otherwise make the verify script download every object in full.
+// Ranged GET, not HEAD -- docs don't commit to HEAD being supported. Body is
+// cancelled rather than read, in case a node ignores Range.
 async function stat(cid) {
   if (!enabled()) throw new Error('s5_not_configured');
   const res = await request(downloadUrl(cid), {
@@ -305,14 +258,9 @@ async function getToFile({ cid, filePath }) {
   return { cid, bytes: check.size };
 }
 
-/*
-| Best effort — check the return value before reporting a takedown.
-|
-| S5 documents no unpin route (only an abstract unpinHash), so the route below
-| is a guess and is off by default. Even a 200 only stops *our* node serving the
-| blob. Returns 'unpinned', 'disabled' or 'failed' so callers can tell a
-| takedown from a gesture.
-*/
+// Best effort: S5 documents no unpin route, only an abstract unpinHash, so
+// this is a guess and off by default. Check the return value before reporting
+// a takedown -- even success only stops our node serving the blob.
 async function unpin(cid) {
   if (!enabled() || !config.S5_UNPIN_ENABLED) return 'disabled';
   try {

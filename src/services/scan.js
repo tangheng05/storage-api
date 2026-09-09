@@ -5,33 +5,15 @@ const sharp = require('sharp');
 const config = require('../config');
 const logger = require('./logger');
 
-/*
-| Decides whether a finished file may be published. Two checks, cheapest first:
-|
-|   phash  perceptual hash against a local blocklist of already-removed
-|          content. Free, offline, and still matches after a re-encode or crop.
-|   http   posts the bytes to whichever classifier is configured. Generic on
-|          purpose, so swapping providers is an env change, not a rewrite.
-|
-| Any single reject wins, so order only affects cost.
-|
-| NOT a CSAM solution: classifiers do not detect it reliably, and hash matching
-| (PhotoDNA, Cloudflare's free tool) is a separate track with its own reporting
-| obligations. Not a malware scanner either — re-encoding to WebP already
-| destroys smuggled payloads before this sees the file.
-*/
+// Decides whether a finished file may be published: phash checks a local blocklist of removed
+// content (offline, survives a re-encode/crop), http posts the bytes to a configured classifier.
+// NOT a CSAM solution (classifiers miss it; hash matching is a separate track with its own
+// reporting obligations) and not a malware scanner (re-encoding to WebP already strips payloads).
 
 const VERDICT = { CLEAN: 'clean', REJECT: 'reject' };
 
-/*
-| Every classifier is a remote call that can blip. Free-tier Gemini in
-| particular answers 503 "experiencing high demand" often enough that a single
-| attempt is not workable: with the gate failing closed, one blip holds an
-| upload until the next hourly sweep.
-|
-| So retry the statuses that mean "try again" and nothing else. A 400 or 403 is
-| a configuration problem and retrying it just delays the error.
-*/
+// Free-tier Gemini answers 503 "experiencing high demand" often enough that a single attempt
+// isn't workable, so retry statuses that mean "try again"; a 400/403 is a config problem instead.
 const TRANSIENT = new Set([429, 500, 502, 503, 504]);
 
 async function post(url, init, { attempts = 3 } = {}) {
@@ -48,8 +30,7 @@ async function post(url, init, { attempts = 3 } = {}) {
       lastError = new Error(`${res.status} ${body}`);
       lastError.retryable = TRANSIENT.has(res.status);
     } catch (err) {
-      // A throw here cannot be re-thrown to skip the retry: it would land in
-      // this same catch. The flag is what decides, not control flow.
+      // Cannot re-throw here to skip the retry -- it would land in this same catch, so a flag decides instead.
       lastError = err.name === 'AbortError' ? new Error('scanner timed out') : err;
       lastError.retryable = true;
     } finally {
@@ -68,8 +49,7 @@ function enabled() {
   return config.SCAN_ENABLED && config.SCAN_PROVIDERS.length > 0;
 }
 
-// Difference hash: 9x8 greyscale, each pixel compared with its right
-// neighbour. Survives re-encoding and rescaling; an exact checksum would not.
+// Difference hash: 9x8 greyscale, each pixel compared with its right neighbour. Survives re-encoding/rescaling; a checksum would not.
 async function perceptualHash(filePath) {
   const raw = await sharp(filePath)
     .removeAlpha()
@@ -111,9 +91,7 @@ async function loadBlocklist() {
       .map((line) => line.split('#')[0].trim().split(/\s+/)[0])
       .filter((h) => /^[0-9a-f]{16}$/i.test(h))
       .map((h) => h.toLowerCase())
-      // A flat image has no pixel-to-pixel differences, so it hashes to all
-      // zeros or all ones. Blocklisting either would refuse every
-      // solid-colour upload on the platform.
+      // A flat image hashes to all zeros or all ones; blocklisting either would refuse every solid-colour upload.
       .filter((h) => h !== '0000000000000000' && h !== 'ffffffffffffffff');
     blocklist = { mtimeMs: stat.mtimeMs, hashes };
     logger.info({ count: hashes.length }, 'scan blocklist loaded');
@@ -133,19 +111,15 @@ async function runPhash(filePath) {
   return {
     provider: 'phash',
     phash: hash,
-    // A hit is a decision, not a probability: this picture was already
-    // removed once. Score 1 so it rejects under any threshold.
+    // A hit is a decision, not a probability -- score 1 so it rejects under any threshold.
     score: hit ? 1 : 0,
     labels: hit ? ['blocklisted'] : [],
     matched: hit || null,
   };
 }
 
-/*
-| Accepts three response shapes so most providers need no adapter:
-|   { "score": 0.93 } | { "verdict": "reject" } | { "scores": {...} } (max wins)
-| Anything else is a scanner error, not a pass.
-*/
+// Accepts three response shapes so most providers need no adapter: { score } | { verdict } |
+// { scores: {...} } (max wins). Anything else is a scanner error, not a pass.
 async function runHttp(filePath, { mediaType }) {
   if (!config.SCAN_HTTP_URL) throw new Error('scan_http_url_not_set');
 
@@ -153,9 +127,8 @@ async function runHttp(filePath, { mediaType }) {
   const headers = { 'content-type': 'application/json' };
   if (config.SCAN_HTTP_KEY) headers[config.SCAN_HTTP_KEY_HEADER] = config.SCAN_HTTP_KEY;
 
-  // redirect: 'error' inside post() matters here: undici does not strip a
-  // custom auth header across origins, so a redirecting classifier could
-  // otherwise exfiltrate the key and the file.
+  // redirect: 'error' inside post() matters here: undici doesn't strip a custom auth header across
+  // origins, so a redirecting classifier could otherwise exfiltrate the key and the file.
   const res = await post(config.SCAN_HTTP_URL, {
     method: 'POST',
     headers,
@@ -182,24 +155,14 @@ async function runHttp(filePath, { mediaType }) {
   throw new Error('scanner response had no verdict, score or scores');
 }
 
-// One threshold, no middle ground: there is no human to hand a borderline file
-// to, so it is refused rather than published. `immutable` is stricter because an
-// S5 publish cannot be undone -- a wrong refusal costs the uploader one attempt
-// and tells them why, while a wrong publish is permanent and public.
+// Single threshold: no human to hand a borderline file to, so it's refused rather than published.
+// `immutable` is stricter because an S5 publish cannot be undone.
 function decide(score, { immutable }) {
   const reject = immutable ? config.SCAN_REJECT_SCORE_IMMUTABLE : config.SCAN_REJECT_SCORE;
   return score >= reject ? VERDICT.REJECT : VERDICT.CLEAN;
 }
 
-/*
-| Google Cloud Vision SafeSearch. Plain API key over fetch -- no SDK, no OAuth,
-| no dependency -- and 1000 images/month free.
-|
-| It answers with likelihood words, not numbers, so they are mapped onto the
-| score bands. With the default thresholds that means LIKELY and above are
-| refused. A false reject costs a real user one upload and tells them the
-| category, which is the trade made when there is no person to appeal to.
-*/
+// Vision answers with likelihood words, not numbers, so they're mapped onto score bands below.
 const LIKELIHOOD = {
   VERY_UNLIKELY: 0,
   UNLIKELY: 0.25,
@@ -243,23 +206,10 @@ async function runVision(filePath) {
   return { provider: 'vision', score, labels: label ? [label] : [] };
 }
 
-/*
-| Gemini as an image classifier.
-|
-| The obvious approach -- reading the safetyRatings that come back on every
-| response -- does not work, and it is worth recording why so nobody tries it
-| again. Those ratings describe the model's OWN ANSWER, not the input: a photo
-| of a handgun collection asked "describe this in one word" rates NEGLIGIBLE on
-| every category, identical to a blank gradient. Worse, threshold BLOCK_NONE
-| suppresses the ratings entirely, so the provider silently returned "clean" for
-| everything.
-|
-| So it has to be asked directly. responseSchema pins the reply to integers,
-| which removes the usual objection to prompting -- there is no prose to parse
-| and nothing to drift -- and temperature 0 keeps it stable. BLOCK_NONE stays,
-| now for the opposite reason: we need an answer about explicit input rather
-| than a refusal.
-*/
+// Gemini's safetyRatings look like a shortcut but describe the model's OWN answer, not the
+// input (a gun photo rates NEGLIGIBLE like a blank gradient), and BLOCK_NONE suppresses them
+// anyway -- so we prompt directly instead, with responseSchema pinning integers (nothing to
+// parse or drift) and temperature 0 for stability; BLOCK_NONE now serves the opposite purpose.
 const GEMINI_SCHEMA = {
   type: 'OBJECT',
   properties: { sexual: { type: 'INTEGER' }, violence: { type: 'INTEGER' }, weapons: { type: 'INTEGER' } },
@@ -340,20 +290,9 @@ const RUNNERS = {
   phash: runPhash, http: runHttp, vision: runVision, gemini: runGemini,
 };
 
-/*
-| Verdict cache, keyed by the perceptual hash we already compute.
-|
-| The classifier is not deterministic. The same file has come back 0.45 and
-| 0.85 on consecutive uploads, either side of the threshold -- so without this,
-| pressing upload again is a re-roll: a refused image gets through on the third
-| try, and a clean one fails for no reason the uploader can see. Remembering
-| what we decided the first time is what makes the gate a decision rather than
-| a dice throw.
-|
-| Read through a mtime check like the blocklist, so an operator editing the file
-| takes effect without a restart. Only whole-image verdicts land here; a
-| blocklist hit short-circuits before the lookup and needs no caching.
-*/
+// Verdict cache, keyed by the perceptual hash we already compute: the classifier is not
+// deterministic (same file has come back 0.45 and 0.85), so without this a retry is a re-roll.
+// Only whole-image verdicts land here; a blocklist hit short-circuits before the lookup.
 let verdictCache = { mtimeMs: -1, entries: {} };
 
 async function loadVerdictCache() {
@@ -376,8 +315,7 @@ async function readCachedVerdict(phash) {
   const entries = await loadVerdictCache();
   const hit = entries[phash];
   if (!hit) return null;
-  // Expiry bounds a wrong answer in both directions. With no review queue there
-  // is nothing to appeal to, so a bad roll must not be permanent.
+  // Expiry bounds a wrong answer in both directions -- with no review queue, a bad roll must not be permanent.
   if ((Date.now() - hit.at) / 1000 > config.SCAN_CACHE_TTL_SEC) return null;
   return hit;
 }
@@ -403,8 +341,7 @@ async function writeCachedVerdict(phash, result) {
 
     const next = Object.fromEntries(kept);
     await fsp.mkdir(path.dirname(config.SCAN_CACHE_PATH), { recursive: true });
-    // Write then rename: a torn file would be read as a cold cache on the next
-    // upload, silently putting the dice back.
+    // Write then rename: a torn file would be read as a cold cache on the next upload.
     const tmp = `${config.SCAN_CACHE_PATH}.tmp`;
     await fsp.writeFile(tmp, JSON.stringify(next));
     await fsp.rename(tmp, config.SCAN_CACHE_PATH);
@@ -415,8 +352,7 @@ async function writeCachedVerdict(phash, result) {
   }
 }
 
-// Throws only when a provider is broken; what that means is policy
-// (SCAN_FAIL_OPEN), decided by the caller.
+// Throws only when a provider is broken; what that means (SCAN_FAIL_OPEN) is policy for the caller.
 async function scanFile({ filePath, mediaType, immutable = false }) {
   if (!enabled()) {
     return { verdict: VERDICT.CLEAN, score: null, labels: [], provider: 'disabled' };
@@ -432,9 +368,7 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     // The remaining providers cost money and cannot change the outcome.
     if (verdict === VERDICT.REJECT) break;
 
-    // A local hash is known once phash has run. If this exact image has been
-    // judged before, reuse that answer instead of paying a classifier to roll
-    // the dice again -- which is what let a refused upload through on a retry.
+    // If this exact image was judged before, reuse that answer instead of paying a classifier to re-roll.
     if (result.phash) {
       // eslint-disable-next-line no-await-in-loop
       const cached = await readCachedVerdict(result.phash);
@@ -465,34 +399,21 @@ async function scanFile({ filePath, mediaType, immutable = false }) {
     verdict: worst.verdict,
     score: worst.score,
     labels: worst.labels || [],
-    // The provider whose verdict won.
     provider: worst.provider,
-    // Every provider that actually answered. Without this a clean result names
-    // only the first one, so there is no way to tell from a job record whether
-    // the classifier ran at all -- and a silently absent classifier looks
-    // exactly like a clean platform.
+    // Every provider that actually answered -- without this, a silently absent classifier looks exactly like a clean platform.
     providers: results.map((r) => r.provider),
-    // Recorded on every job so a later takedown can blocklist it.
     phash: (results.find((r) => r.phash) || {}).phash || null,
     matched: (results.find((r) => r.matched) || {}).matched || null,
   };
 
-  // Blocklist hits are already deterministic and are recorded elsewhere; there
-  // is nothing to remember and caching them would just duplicate that list.
+  // Blocklist hits are already deterministic and recorded elsewhere; nothing to remember.
   if (!decided.matched) await writeCachedVerdict(decided.phash, decided);
 
   return decided;
 }
 
-/*
-| What an uploader is told when their file is refused.
-|
-| Providers encode the score into the label ('sexual:87'), and handing that
-| number back teaches a determined uploader exactly where the threshold sits, so
-| only the category survives here. The full label stays on the job record for
-| moderators. Naming the category is the point: 'rejected' alone leaves someone
-| with a legitimate photo no way to tell a false positive from a real one.
-*/
+// What an uploader is told when refused: providers encode the score into the label ('sexual:87'),
+// but handing that back would teach a determined uploader the threshold, so only the category survives here.
 const REASON_ALIASES = {
   blocklisted: 'previously_removed',
   blocked: 'unsafe',
@@ -504,18 +425,12 @@ function publicReasons(job) {
   const categories = [...new Set(
     labels.map((label) => String(label).split(':')[0].trim()).filter(Boolean),
   )].map((category) => REASON_ALIASES[category] || category);
-  // Never an empty list: a refusal with no stated reason is the thing this is
-  // here to prevent.
+  // Never an empty list: a refusal with no stated reason is what this exists to prevent.
   return categories.length ? categories : ['unspecified'];
 }
 
-/*
-| The same refusal as a sentence a person can read.
-|
-| `publicReasons` stays the machine-readable half: slugs are what a bilingual
-| frontend maps onto its own Khmer and English strings. This is the fallback for
-| anything that has no mapping yet, so a refused upload is never a bare code.
-*/
+// `publicReasons` stays the machine-readable half (slugs a bilingual frontend maps to its own
+// strings); this is the fallback sentence for anything with no mapping yet.
 const REASON_TEXT = {
   sexual: 'nudity or sexual content',
   violence: 'graphic violence or injury',
