@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Resumable media upload and storage API: tus uploads, ffmpeg/sharp normalisation, content scanning, and content-addressed publishing to Sia via S5.",
   "private": true,
+  "license": "MIT",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
