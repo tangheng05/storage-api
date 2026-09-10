@@ -132,3 +132,7 @@ usage.
 Delivery comes from this server: other nodes can locate a file but not serve
 it, since the Sia copies are ciphertext. That is durability, not high
 availability.
+
+## License
+
+[MIT](LICENSE) © tangheng05
