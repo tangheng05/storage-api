@@ -272,20 +272,26 @@ router.get('/:ticket', async (req, res) => {
   const zip = new yazl.ZipFile();
   const { folder, entries } = ticket;
 
-  // The manifest is fixed, so the stream is reproducible: a ticket can be
-  // followed again if the first attempt dies mid-download.
+  /*
+  | Entries sit at the root of the zip, not inside a folder of their own.
+  |
+  | The archive is named `${folder}.zip` below, and every desktop unzips that
+  | into a folder of the same name — so wrapping the entries as well gave
+  | people two identical folders to click through before reaching their
+  | files. The name lives on the zip; the contents stay flat.
+  */
   for (const entry of entries) {
     zip.addReadStream(
       // Lazily opened by yazl, one at a time and in order, so only the entry
       // being written is ever in flight.
       lazyStream(entry),
-      `${folder}/${entry.path}`,
+      entry.path,
       { size: entry.bytes, compress: false, mtime: new Date(0), mode: 0o100644 },
     );
   }
 
   if (entries.length === 0) {
-    zip.addBuffer(Buffer.from(EMPTY_NOTE), `${folder}/README.txt`, { compress: false, mtime: new Date(0) });
+    zip.addBuffer(Buffer.from(EMPTY_NOTE), 'README.txt', { compress: false, mtime: new Date(0) });
   }
 
   zip.end({ forceZip64Format: false }, (finalSize) => {

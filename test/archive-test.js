@@ -150,16 +150,19 @@ const readZip = (buffer) =>
   // zip at all, so it would fail a perfectly good archive.
   const files = await readZip(body);
 
-  const folder = 'serey-alice-2026-09-14';
-  assert.strictEqual(files.get(`${folder}/videos.csv`).toString('utf8'), csv,
+  // Entries sit at the root: the zip is already named for the export, and
+  // every desktop unzips it into a folder of that name.
+  assert.strictEqual(files.get('videos.csv').toString('utf8'), csv,
     'inline entry round trip failed');
-  assert.ok(files.get(`${folder}/videos/hello.mp4`).equals(videoBytes),
+  assert.ok(files.get('videos/hello.mp4').equals(videoBytes),
     'stored video bytes differ after round trip');
   // The duplicate path must have been suffixed, not overwritten.
-  assert.ok(files.get(`${folder}/videos/hello-2.mp4`).equals(videoBytes),
+  assert.ok(files.get('videos/hello-2.mp4').equals(videoBytes),
     'deduped entry is wrong');
-  assert.ok(files.get(`${folder}/videos/paid.mp4`).equals(privateBytes),
+  assert.ok(files.get('videos/paid.mp4').equals(privateBytes),
     'owner private media should be included');
+  assert.ok(![...files.keys()].some((key) => key.startsWith('serey-alice-')),
+    'entries must not be wrapped in a folder named after the zip');
   assert.strictEqual(files.size, 4, `unexpected entry count: ${[...files.keys()]}`);
 
   // 4. Private media: visible to its owner, and to nobody else.
@@ -284,7 +287,7 @@ const readZip = (buffer) =>
   })).json();
   assert.strictEqual(s5Ticket.bytes, s5Bytes.length, 'S5 size must come from s5.stat');
   const s5Zip = await readZip(Buffer.from(await (await fetch(`${base}/archive/${s5Ticket.ticket}`)).arrayBuffer()));
-  assert.ok(s5Zip.get('s5-export/videos/remote.mp4').equals(s5Bytes),
+  assert.ok(s5Zip.get('videos/remote.mp4').equals(s5Bytes),
     'archive must stream S5-backed bytes intact');
 
   // 6b. s5.stat must report a size even when the node ignores Range and answers
