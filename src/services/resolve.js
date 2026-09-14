@@ -3,6 +3,7 @@ const fsp = require('fs/promises');
 const config = require('./../config');
 const jobs = require('./jobs');
 const s5 = require('./s5');
+const mirror = require('./mirror');
 const { exists } = require('../utils/fs');
 
 /*
@@ -24,12 +25,17 @@ const { exists } = require('../utils/fs');
 
 const KINDS = ['videos', 'audio', 'images', 'thumbnails'];
 
-const LOCAL_DIRS = {
-  videos: config.VIDEOS_DIR,
-  audio: config.AUDIO_DIR,
-  images: config.IMAGES_DIR,
-  thumbnails: config.THUMBS_DIR,
-};
+/*
+| Where a job's file sits on disk. Public and private media live in different
+| directories (processor.js writes a private video to PRIVATE_VIDEOS_DIR), so
+| the job's own visibility has to pick the directory: looking only in the
+| public one made a private, disk-only file report "not found" to the archive
+| while the signed /media route served it fine. mirror.localPathFor is what
+| that route and the publish retry both use, so it is the one answer here too.
+| Thumbnails are the exception: one directory, whatever the job's visibility.
+*/
+const localPathOf = (job, kind, file) =>
+  (kind === 'thumbnails' ? path.join(config.THUMBS_DIR, file) : mirror.localPathFor(job, file));
 
 const CONTENT_TYPES = {
   '.webp': 'image/webp',
@@ -94,8 +100,7 @@ async function locate({ kind, file, allowPrivate = false, owner = null }) {
   if (cid) return { ok: true, id, kind, file, cid, localPath: null, job, contentType };
 
   // Awaiting /promote, or s3d/local-only.
-  const dir = LOCAL_DIRS[kind];
-  const localPath = dir && path.join(dir, file);
+  const localPath = localPathOf(job, kind, file);
   if (!localPath || !(await exists(localPath))) return { ok: false, status: 404 };
 
   return { ok: true, id, kind, file, cid: null, localPath, job, contentType };
@@ -142,4 +147,4 @@ async function open(found, { range } = {}) {
   return { upstream, status: upstream.status, headers: upstream.headers };
 }
 
-module.exports = { locate, size, open, KINDS, FILE_RE, contentTypeFor, LOCAL_DIRS };
+module.exports = { locate, size, open, KINDS, FILE_RE, contentTypeFor };

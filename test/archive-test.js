@@ -28,6 +28,12 @@ process.env.VIDEOS_DIR = dir('videos');
 process.env.THUMBS_DIR = dir('thumbnails');
 process.env.IMAGES_DIR = dir('images');
 process.env.AUDIO_DIR = dir('audio');
+// Private media has its own directory, exactly as in production. The private
+// test file goes there and nowhere else: this is the layout that made a real
+// premium video report "not found" to the archive on 2026-09-14.
+process.env.PRIVATE_VIDEOS_DIR = dir('private/videos');
+process.env.PRIVATE_IMAGES_DIR = dir('private/images');
+process.env.PRIVATE_AUDIO_DIR = dir('private/audio');
 process.env.PUBLIC_BASE_URL = 'http://localhost:8080';
 
 const express = require('../src/app');
@@ -41,7 +47,7 @@ const videoBytes = Buffer.alloc(3_000_017, 0xab);
 const privateBytes = Buffer.alloc(1_234, 0xcd);
 
 fs.writeFileSync(path.join(process.env.VIDEOS_DIR, `${PUBLIC_ID}.mp4`), videoBytes);
-fs.writeFileSync(path.join(process.env.VIDEOS_DIR, `${PRIVATE_ID}.mp4`), privateBytes);
+fs.writeFileSync(path.join(process.env.PRIVATE_VIDEOS_DIR, `${PRIVATE_ID}.mp4`), privateBytes);
 fs.writeFileSync(
   path.join(process.env.JOBS_DIR, `${PUBLIC_ID}.json`),
   JSON.stringify({ id: PUBLIC_ID, state: 'ready', visibility: 'public', media_type: 'video' }),
