@@ -234,7 +234,13 @@ async function stat(cid) {
   if (!res.ok && res.status !== 206) {
     throw new Error(`s5 stat failed: ${res.status}`);
   }
-  const total = (res.headers.get('content-range') || '').split('/')[1];
+  // A 206 carries the full length after the slash in content-range. But a node
+  // that ignores the range answers 200 with the whole body, and then only
+  // content-length holds the size -- reading content-range alone returned null
+  // there, which surfaced as "size unavailable" and dropped the file from an
+  // export the CDN could serve fine.
+  const fromRange = (res.headers.get('content-range') || '').split('/')[1];
+  const total = fromRange || res.headers.get('content-length');
   return { bytes: total ? parseInt(total, 10) : null };
 }
 

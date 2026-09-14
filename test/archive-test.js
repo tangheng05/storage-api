@@ -35,6 +35,12 @@ process.env.PRIVATE_VIDEOS_DIR = dir('private/videos');
 process.env.PRIVATE_IMAGES_DIR = dir('private/images');
 process.env.PRIVATE_AUDIO_DIR = dir('private/audio');
 process.env.PUBLIC_BASE_URL = 'http://localhost:8080';
+// S5 looks configured so s5.stat passes its enabled() gate. The node is never
+// really dialled: every S5 call in this test is stubbed. This must be set
+// before any require, since config reads it at module load.
+process.env.S5_ENABLED = 'true';
+process.env.S5_NODE_URL = process.env.S5_NODE_URL || 'http://127.0.0.1:5999';
+process.env.S5_AUTH_TOKEN = process.env.S5_AUTH_TOKEN || 'test-token';
 
 const express = require('../src/app');
 const archiveRouter = require('../src/routes/archive');
@@ -205,6 +211,7 @@ const readZip = (buffer) =>
   // 6. The S5 branch: the path production actually serves from. No node here,
   // so s5 is stubbed to answer like one, including Range.
   const s5 = require('../src/services/s5');
+  const realStat = s5.stat; // captured before the stub below replaces it
   const S5_ID = '01HZZZZZZZZZZZZZZZZZZZZZZC';
   const s5Bytes = Buffer.alloc(2_500_000, 0x5a);
   fs.writeFileSync(
@@ -279,6 +286,26 @@ const readZip = (buffer) =>
   const s5Zip = await readZip(Buffer.from(await (await fetch(`${base}/archive/${s5Ticket.ticket}`)).arrayBuffer()));
   assert.ok(s5Zip.get('s5-export/videos/remote.mp4').equals(s5Bytes),
     'archive must stream S5-backed bytes intact');
+
+  // 6b. s5.stat must report a size even when the node ignores Range and answers
+  // 200 with the whole body (no content-range). This is the exact case that
+  // dropped a public thumbnail from an export the CDN served fine.
+  {
+    const realFetch = global.fetch;
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      body: { cancel: async () => {} },
+      headers: new Headers({ 'content-length': '124693' }),
+    });
+    try {
+      const stat = await realStat('cid-no-range');
+      assert.ok(stat && stat.bytes === 124693,
+        `stat must fall back to content-length, got ${JSON.stringify(stat)}`);
+    } finally {
+      global.fetch = realFetch;
+    }
+  }
 
   // 7. An expired or unknown ticket is a 404.
   const bogus = await fetch(`${base}/archive/nope`);
