@@ -8,11 +8,12 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js",
+    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js && node test/archive-test.js",
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
     "test:blob": "node test/s5-blob-test.js",
-    "test:queue": "node test/queue-test.js"
+    "test:queue": "node test/queue-test.js",
+    "test:archive": "node test/archive-test.js"
   },
   "repository": {
     "type": "git",
@@ -36,9 +37,11 @@
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "sharp": "^0.34.5",
-    "ulid": "^2.3.0"
+    "ulid": "^2.3.0",
+    "yazl": "^3.3.1"
   },
   "devDependencies": {
-    "tus-js-client": "^4.3.1"
+    "tus-js-client": "^4.3.1",
+    "yauzl": "^3.4.0"
   }
 }

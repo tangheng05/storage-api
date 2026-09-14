@@ -177,4 +177,21 @@ module.exports = {
 
   FFMPEG_PATH: process.env.FFMPEG_PATH || 'ffmpeg',
   FFPROBE_PATH: process.env.FFPROBE_PATH || 'ffprobe',
+
+  // Data export archives (routes/archive.js). A ticket is the capability to
+  // download one archive, so it is short lived by design: the browser follows
+  // the link within seconds of it being issued.
+  ARCHIVE_TICKET_TTL_SEC: num(process.env.ARCHIVE_TICKET_TTL_SEC, 1800),
+  ARCHIVE_MAX_ENTRIES: num(process.env.ARCHIVE_MAX_ENTRIES, 50000),
+  // 0 disables the ceiling. Nothing is buffered, so a big archive costs
+  // bandwidth and time rather than memory or disk.
+  ARCHIVE_MAX_BYTES: num(process.env.ARCHIVE_MAX_BYTES, 0),
+  // Metadata files ride along inside the ticket request; past this the caller
+  // ships them separately rather than pushing a huge JSON body through.
+  ARCHIVE_INLINE_MAX_BYTES: num(process.env.ARCHIVE_INLINE_MAX_BYTES, 26214400),
+  // The only hosts an archive will fetch bytes from, beyond our own storage.
+  // An allowlist, because the entry list arrives over the wire: without it
+  // this route would fetch any URL a caller names.
+  ARCHIVE_LEGACY_HOSTS: csv(process.env.ARCHIVE_LEGACY_HOSTS, 'upload.serey.io'),
+  ARCHIVE_SIZE_CONCURRENCY: num(process.env.ARCHIVE_SIZE_CONCURRENCY, 16),
 };

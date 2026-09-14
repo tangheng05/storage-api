@@ -9,6 +9,7 @@ const tusServer = require('./tus');
 const uploadsRouter = require('./routes/uploads');
 const mediaRouter = require('./routes/media');
 const cdnRouter = require('./routes/cdn');
+const archiveRouter = require('./routes/archive');
 const blobRouter = require('./routes/blob');
 const moderationRouter = require('./routes/moderation');
 
@@ -107,6 +108,9 @@ const moderationLimiter = rateLimit({
 });
 app.use('/moderation', moderationLimiter, express.json({ limit: '8kb' }), moderationRouter);
 app.use('/cdn', cdnRouter);
+// Export archives. The POST is master-key gated; the GET is the ticket itself,
+// because a browser cannot put a secret header on a download it navigates to.
+app.use('/archive', archiveRouter);
 
 app.use('/videos', uploadsRouter('videos'));
 app.use('/audio', uploadsRouter('audio'));
