@@ -10,6 +10,8 @@ const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middl
 // Builds the status/delete router for one media type (video, audio, image).
 // `fields` are the job columns that type reports; `files` lists every path
 // the bytes could occupy -- public, premium, and still at the scan gate.
+const MEDIA_TYPES = { images: 'image', videos: 'video', audio: 'audio' };
+
 const KINDS = {
   images: {
     noun: 'image',
@@ -79,6 +81,12 @@ function makeRouter(kind) {
       const { id } = req.params;
       const job = await jobs.get(id);
       if (!job) return res.status(404).json({ error: 'Not found' });
+      // A document deleted here would lose its record and its backend copy but
+      // keep its bytes: this router cannot reach DOCUMENTS_DIR, and nothing
+      // would point at them afterwards. /documents/:id is the only way.
+      if (job.media_type && job.media_type !== MEDIA_TYPES[kind]) {
+        return res.status(404).json({ error: 'Not found' });
+      }
       // Ids are public: a user-driven delete carries the verified requester
       // in x-delete-owner. Master-key calls without it are unrestricted.
       const requester = req.headers['x-delete-owner'];
