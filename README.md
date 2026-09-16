@@ -145,6 +145,9 @@ usage.
 ## Notes
 
 - [deploy/SETUP.md](deploy/SETUP.md) — VPS runbook.
+- [deploy/OPERATIONS.md](deploy/OPERATIONS.md) — health checks, known failures
+  and what has to survive a server move. A broken backend looks healthy from
+  the front end, so health is read from the job store.
 - [deploy/s5/README.md](deploy/s5/README.md) — the S5 node and s3d, the
   `cdnUrls` setting without which every node read fails, and where the S5 spec
   disagrees with a real node. The constants in `src/services/s5.js` follow the
