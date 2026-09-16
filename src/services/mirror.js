@@ -6,6 +6,7 @@ const jobs = require('./jobs');
 const queue = require('./queue');
 const sia = require('./sia');
 const s5 = require('./s5');
+const s5blob = require('./s5blob');
 const logger = require('./logger');
 const { exists } = require('../utils/fs');
 
@@ -255,11 +256,52 @@ function recoverOnBoot() {
   });
 }
 
-// Per-slot report, not a boolean: s3d 'deleted' is really gone, but S5 has no
-// unpin route (only an abstract unpinHash), so its delete is best effort --
-// 'unpinned' at best, 'disabled' by default, and any node that already
-// fetched the blob can keep serving it forever. Never throws: a local delete
-// must succeed even if a backend is down.
+/*
+| Destroys an S5 blob by deleting it from the bucket the node stores it in --
+| ours. S5 documents no unpin, but it does not have to: we own the bytes.
+|
+| Refuses when another job shares the blob. S5 names blobs by their own hash,
+| so two identical uploads are one stored object and deleting for one job would
+| take the other's bytes with it.
+|
+| Both objects go: the blob and the .obao verification tree beside it.
+*/
+async function deleteS5Blob({ id, cid, slot }) {
+  if (!config.S5_BLOB_DELETE_ENABLED) return 'delete-disabled';
+  if (!s5blob.enabled()) return 'no-blob-store';
+
+  const key = s5.blobKeyFor(cid);
+  if (!key) {
+    logger.error({ id, cid, slot }, 'cannot derive a blob key from this CID');
+    return 'unresolvable';
+  }
+
+  let shared;
+  try {
+    shared = await jobs.usedByOther(cid, id);
+  } catch (err) {
+    logger.error({ id, cid, slot, err: err.message }, 'could not check whether the blob is shared');
+    return 'share-check-failed';
+  }
+  if (shared) {
+    logger.warn({ id, cid, slot }, 'blob kept: another job still uses these bytes');
+    return 'shared';
+  }
+
+  try {
+    await s5blob.deleteObject({ key });
+    await s5blob.deleteObject({ key: `${key}.obao` });
+    logger.info({ id, cid, key, slot }, 'blob deleted, the CID no longer resolves');
+    return 'deleted';
+  } catch (err) {
+    logger.error({ id, cid, key, slot, err: err.message }, 'blob delete failed, content still fetchable');
+    return 'failed';
+  }
+}
+
+// Per-slot report, not a boolean: the caller has to be able to tell a user what
+// actually happened to their bytes. Never throws: a local delete must succeed
+// even if a backend is down.
 async function purge(job) {
   const report = {};
   if (!job) return report;
@@ -273,13 +315,19 @@ async function purge(job) {
     const done = [];
 
     if (cid) {
+      // The node's own index; best effort and off by default, since S5
+      // documents no route for it. The blob delete below is what matters.
       // eslint-disable-next-line no-await-in-loop
-      const result = await s5.unpin(cid);
-      done.push(`s5:${result}`);
-      if (result !== 'unpinned') {
+      const unpinned = await s5.unpin(cid);
+      if (unpinned === 'unpinned') done.push('s5:unpinned');
+
+      // eslint-disable-next-line no-await-in-loop
+      const blob = await deleteS5Blob({ id: job.id, cid, slot });
+      done.push(`s5:${blob}`);
+      if (blob !== 'deleted' && blob !== 'shared') {
         logger.error(
-          { id: job.id, cid, slot, result },
-          'S5 CONTENT NOT RETRACTABLE, it remains fetchable by CID',
+          { id: job.id, cid, slot, blob },
+          'S5 CONTENT NOT RETRACTED, it remains fetchable by CID',
         );
       }
     }

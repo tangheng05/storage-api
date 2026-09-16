@@ -125,6 +125,10 @@ module.exports = {
   // Wait for /promote instead of pushing on scan-clear, so an editor's
   // abandoned drafts never reach S5. The URL is the /cdn/ one either way.
   S5_PROMOTE_ON_PUBLISH: process.env.S5_PROMOTE_ON_PUBLISH === 'true',
+  // Delete the blob from our own bucket on purge. S5 documents no unpin, but it
+  // stores blobs in a bucket we own, so this is what makes a takedown real.
+  // Skipped when another job shares the blob -- identical uploads are one file.
+  S5_BLOB_DELETE_ENABLED: process.env.S5_BLOB_DELETE_ENABLED !== 'false',
   // A CID can't be withdrawn once shown, so this stays off until exposing it is deliberate.
   S5_EXPOSE_CID: process.env.S5_EXPOSE_CID === 'true',
 

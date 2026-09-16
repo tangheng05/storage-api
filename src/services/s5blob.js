@@ -57,4 +57,23 @@ async function getObject({ key, range }) {
   }
 }
 
-module.exports = { enabled, getObject };
+// Already-absent counts as deleted: a retried takedown must not report failure
+// for bytes that are gone.
+async function deleteObject({ key }) {
+  if (!enabled()) throw new Error('s5_blob_not_configured');
+  try {
+    await getClient().send(
+      new commands.DeleteObjectCommand({
+        Bucket: config.S5_BLOB_S3_BUCKET,
+        Key: key,
+      }),
+    );
+    return true;
+  } catch (err) {
+    const status = err.$metadata?.httpStatusCode;
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound' || status === 404) return true;
+    throw err;
+  }
+}
+
+module.exports = { enabled, getObject, deleteObject };

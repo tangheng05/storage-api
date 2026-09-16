@@ -60,6 +60,11 @@ Documents never reach S5 and are never publicly served. The hash is a
 commitment, not an address: it proves the bytes, and once they are gone it
 resolves to nothing. That is the whole difference from a CID.
 
+Deleting media removes the blob from the s3d bucket the S5 node stores it in,
+so the CID stops resolving. S5 documents no unpin, but the bucket is ours. A
+blob another job still references is left alone -- identical uploads are one
+stored file, so deleting for one job would take the other's bytes with it.
+
 ## Auth
 
 `x-upload-key: <UPLOAD_API_KEY>` on every upload, status and delete.

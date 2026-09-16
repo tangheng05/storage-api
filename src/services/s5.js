@@ -54,6 +54,48 @@ function buildCid(hash, size) {
   return `z${base58btc(Buffer.from([...CID_MAGIC, ...hash, ...sizeBytes]))}`;
 }
 
+function base58decode(str) {
+  const bytes = [0];
+  for (const ch of str) {
+    const val = B58.indexOf(ch);
+    if (val < 0) return null;
+    let carry = val;
+    for (let i = 0; i < bytes.length; i += 1) {
+      carry += bytes[i] * 58;
+      bytes[i] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  for (const ch of str) {
+    if (ch !== '1') break;
+    bytes.push(0);
+  }
+  return Buffer.from(bytes.reverse());
+}
+
+/*
+| Where the node keeps this blob in its S3 store -- the bucket we own, so a
+| takedown can delete the bytes even though S5 documents no unpin.
+|
+| The key drops the CID's 0x26 type byte and keeps the multihash (0x1f ||
+| hash). Null for anything malformed: purge must never throw.
+|
+| scripts/s5-cid-to-key.js derives the same key standalone, on purpose -- an
+| outside auditor should not have to load this service to check us. A test
+| pins the two against each other.
+*/
+function blobKeyFor(cid) {
+  if (typeof cid !== 'string' || !cid.startsWith('z')) return null;
+  const raw = base58decode(cid.slice(1));
+  if (!raw || raw.length < 34) return null;
+  if (raw[0] !== CID_BLOB_MAGIC || raw[1] !== BLAKE3_MULTIHASH) return null;
+  return `1/${raw.subarray(1, 34).toString('base64url')}`;
+}
+
 // Streamed so a 2GB video is never held in memory.
 async function hashFile(filePath) {
   const hasher = blake3.create({});
@@ -283,6 +325,7 @@ async function unpin(cid) {
 }
 
 module.exports = {
+  blobKeyFor,
   enabled,
   buildCid,
   hashFile,
