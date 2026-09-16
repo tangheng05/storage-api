@@ -56,9 +56,11 @@ router.all('/:kind/:file', async (req, res) => {
 
   const { upstream } = opened;
 
-  // Content-addressed bytes can't change, so caching forever is safe -- the
-  // ULID -> CID mapping isn't immutable, but a deleted job stops resolving above.
-  res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}, immutable`);
+  // Not `immutable`, even though the bytes are content-addressed: that tells a
+  // cache never to revalidate, so a takedown would keep being served for the
+  // whole TTL by anything already holding the response. The bytes cannot
+  // change; whether we still serve them can.
+  res.set('Cache-Control', `public, max-age=${config.MEDIA_CDN_CACHE_SEC}`);
   res.set('Content-Type', found.contentType);
   res.set('Accept-Ranges', 'bytes');
   for (const h of ['content-length', 'content-range']) {

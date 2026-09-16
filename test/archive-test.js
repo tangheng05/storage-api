@@ -257,8 +257,13 @@ const readZip = (buffer) =>
   const whole = await fetch(`${base}/cdn/videos/${S5_ID}.mp4`);
   assert.strictEqual(whole.status, 200, 'CDN must serve an S5-backed file');
   assert.ok(Buffer.from(await whole.arrayBuffer()).equals(s5Bytes), 'S5 bytes differ');
-  assert.match(whole.headers.get('cache-control'), /immutable/,
-    'content addressed bytes must be cached immutable');
+  // Cached, but never `immutable`: that tells a cache not to revalidate, so a
+  // deleted file keeps being served for the whole TTL by anything holding the
+  // response. The bytes cannot change; whether we still serve them can.
+  assert.match(whole.headers.get('cache-control'), /max-age=\d+/,
+    'CDN responses must be cacheable');
+  assert.doesNotMatch(whole.headers.get('cache-control'), /immutable/,
+    'a takedown cannot reach a response a cache was told never to revalidate');
   assert.strictEqual(whole.headers.get('content-type'), 'video/mp4');
 
   // Range must reach S5 untouched and the 206 must be passed back, or seeking
