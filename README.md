@@ -85,15 +85,18 @@ service knows no users, so who may go forever -- a membership, a fee, a quota
 the upload key from spending credits around it.
 
 The bytes are hashed against the S5 CID before they are paid for, so the
-`S5-CID` tag on the data item is always true; a deferred upload is pushed to
-S5 first. Identical bytes reuse one data item. Paywalled media, anything not
+`S5-CID` tag on the data item is always true; a local copy that drifted is
+replaced by a verified restore from S5, and a deferred upload is pushed to S5
+first. Identical bytes reuse one data item. Paywalled media, anything not
 `ready`, and anything over `ARWEAVE_MAX_BYTES` are refused. A failed upload
 stays `failed` until asked again: every attempt costs money. An upload
 interrupted by a restart is marked failed too, since a blind retry could pay
 twice.
 
 `DELETE` still removes every copy we hold and reports `arweave: permanent:<id>`
-so the caller can tell the user what did not go. `s5_cid` is shown for a
+so the caller can tell the user what did not go. While an upload is in flight
+it answers 409 `arweave_upload_in_progress`: a Turbo upload cannot be called
+back, and a delete that said "gone" would be wrong minutes later. `s5_cid` is shown for a
 forever job whatever `S5_EXPOSE_CID` says: it is already public in the data
 item's tags, and the main API needs it for the chain record.
 

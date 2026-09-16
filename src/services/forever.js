@@ -114,17 +114,24 @@ function ensureOnS5(id, job) {
   });
 }
 
-// The local file when we still have it, else a verified restore from S5 into
-// a temp path the caller removes. Either way the bytes are hashed against the
-// CID before they are paid for.
+// The local file when it still hashes to the CID, else a verified restore
+// from S5 into a temp path the caller removes. S5 is the reference: a local
+// copy that drifted (a bad restore, a disk fault) must not be what gets paid
+// for, and must not make every retry fail the same way.
 async function sourceFor(job, file) {
   const local = mirror.localPathFor(job, file);
   if (!local) throw new Error(`no local path for media type ${job.media_type}`);
-  if (await exists(local)) return { filePath: local, temp: false };
+  if (await exists(local)) {
+    const { cid, size } = await s5.hashFile(local);
+    if (cid === job.s5_cid) return { filePath: local, size, temp: false };
+    logger.warn({ id: job.id, local: cid, s5: job.s5_cid }, 'forever: local bytes differ from S5, restoring');
+  }
 
   const tmp = path.join(path.dirname(local), `.${file}.arweave`);
   await s5.getToFile({ cid: job.s5_cid, filePath: tmp });
-  return { filePath: tmp, temp: true };
+  const { cid, size } = await s5.hashFile(tmp);
+  if (cid !== job.s5_cid) throw new Error(`restored bytes differ from S5 (${cid} vs ${job.s5_cid})`);
+  return { filePath: tmp, size, temp: true };
 }
 
 async function checkCredits(bytes) {
@@ -165,10 +172,7 @@ async function archive(id) {
     }
 
     source = await sourceFor(job, file);
-    const { cid, size } = await s5.hashFile(source.filePath);
-    if (cid !== job.s5_cid) {
-      throw new Error(`local bytes differ from S5 (${cid} vs ${job.s5_cid})`);
-    }
+    const { size } = source;
     if (config.ARWEAVE_MAX_BYTES > 0 && size > config.ARWEAVE_MAX_BYTES) {
       throw new Error(`over_permanence_cap: ${size} > ${config.ARWEAVE_MAX_BYTES}`);
     }
@@ -191,6 +195,12 @@ async function archive(id) {
     });
 
     const gateway = await arweave.stat(arweaveId);
+    // Deleted meanwhile: never resurrect the record. The copy exists and was
+    // paid for, and the only honest thing left is to say so loudly.
+    if (!(await jobs.get(id))) {
+      logger.error({ id, cid: job.s5_cid, arweave_id: arweaveId }, 'FOREVER COPY LANDED FOR DELETED MEDIA, it is permanent');
+      return;
+    }
     await jobs.update(id, {
       arweave_state: 'published',
       arweave_id: arweaveId,
@@ -203,7 +213,9 @@ async function archive(id) {
     logger.info({ id, cid: job.s5_cid, arweave_id: arweaveId, bytes, winc, gateway }, 'forever: published to arweave');
   } catch (err) {
     logger.error({ id, err: err.message }, 'forever: arweave publish failed');
-    await jobs.update(id, { arweave_state: 'failed', arweave_error: err.code || err.message });
+    if (await jobs.get(id)) {
+      await jobs.update(id, { arweave_state: 'failed', arweave_error: err.code || err.message });
+    }
   } finally {
     if (source && source.temp) await fsp.rm(source.filePath, { force: true });
   }

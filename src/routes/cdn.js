@@ -54,7 +54,9 @@ router.all('/:kind/:file', async (req, res) => {
     );
     // Forever media has a second copy. Only on failure, never as the primary:
     // public gateways throttle video, and the redirect must not be cached.
-    if (found.job && found.job.arweave_id) {
+    // Main file only -- the thumbnail has no copy there, and the video's id
+    // would hand an <img> an MP4.
+    if (found.kind !== 'thumbnails' && found.job && found.job.arweave_id) {
       res.set('Cache-Control', 'no-store');
       return res.redirect(302, arweave.gatewayUrl(found.job.arweave_id));
     }

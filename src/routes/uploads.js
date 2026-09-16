@@ -96,6 +96,13 @@ function makeRouter(kind) {
       if (requester && job.owner && requester !== job.owner) {
         return res.status(403).json({ error: `Not the owner of this ${noun}` });
       }
+      // A Turbo upload cannot be called back once sent. Deleting now would
+      // report "gone" and then the permanent copy would land anyway; wait for
+      // it to finish and the report will say so. 'pending' is fine: the queued
+      // task finds no job and stops.
+      if (job.arweave_state === 'uploading') {
+        return res.status(409).json({ error: 'arweave_upload_in_progress', message: 'A permanent copy is being written; retry once arweave_state settles' });
+      }
       await Promise.all([
         ...files(id).map((p) => fsp.rm(p, { force: true })),
         fsp.rm(path.join(config.TUS_DIR, id), { force: true }),

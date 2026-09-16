@@ -305,15 +305,25 @@ async function main() {
     check('and never paid for', uploads.length === before);
   }
 
-  // --- bytes must match the CID ---
+  // --- bytes must match the CID: S5 is the reference ---
   {
-    const { id, file, filePath } = await makeImage({ bytes: 'original bytes' });
+    const { id, file, filePath, cid } = await makeImage({ bytes: 'original bytes' });
     await fsp.writeFile(filePath, 'tampered bytes');
-    const before = uploads.length;
+    restorable[cid] = 'original bytes';
     await request('POST', `/media/images/${file}/arweave`, { headers: AR });
     const job = await untilState(id, ['published', 'failed']);
-    check('local bytes that differ from the S5 CID are refused', job.arweave_state === 'failed' && /differ from S5/.test(job.arweave_error));
-    check('and never paid for', uploads.length === before);
+    check('a local copy that drifted from the S5 CID is replaced by a restore, not paid for', job.arweave_state === 'published');
+    const up = uploads[uploads.length - 1];
+    check('what went up is the S5 bytes', up.bytes === Buffer.byteLength('original bytes') && up.filePath.endsWith('.arweave'));
+
+    const both = await makeImage({ bytes: 'both wrong' });
+    await fsp.writeFile(both.filePath, 'drifted');
+    restorable[both.cid] = 'also wrong';
+    const before = uploads.length;
+    await request('POST', `/media/images/${both.file}/arweave`, { headers: AR });
+    const bj = await untilState(both.id, ['published', 'failed']);
+    check('when the restore is wrong too it fails', bj.arweave_state === 'failed' && /differ from S5/.test(bj.arweave_error));
+    check('and never pays', uploads.length === before);
   }
 
   // --- identical bytes, one data item ---
@@ -401,6 +411,75 @@ async function main() {
     const nf = await request('GET', `/cdn/images/${normal.file}`);
     check('a normal file with S5 down is still 502', nf.status === 502);
     s5Down = false;
+  }
+
+  // --- thumbnails have no copy on Arweave ---
+  {
+    const id = nextId();
+    const thumb = `${id}.jpg`;
+    await fsp.writeFile(path.join(config.THUMBS_DIR, thumb), 'poster');
+    const { cid } = await s5.hashFile(path.join(config.THUMBS_DIR, thumb));
+    await jobs.create(id, {
+      state: 'ready', media_type: 'video', visibility: 'public', s5_cid: 'zMain', s5_thumb_cid: cid,
+      arweave_id: TX, arweave_state: 'published', url: `${config.MEDIA_CDN_BASE_URL}/videos/${id}.mp4`,
+    });
+    s5Down = true;
+    const r = await request('GET', `/cdn/thumbnails/${thumb}`);
+    check('a forever video thumbnail with S5 down is 502, not a redirect to the video bytes', r.status === 502);
+    s5Down = false;
+  }
+
+  // --- delete while the paid upload is in flight ---
+  {
+    const { id, file } = await makeImage({ bytes: 'deleting mid-upload', extra: { arweave_state: 'uploading' } });
+    const r = await request('DELETE', `/images/${id}`, { headers: UP });
+    check('delete during an in-flight upload is refused', r.status === 409 && r.json.error === 'arweave_upload_in_progress');
+    check('the job is still there', !!(await jobs.get(id)));
+
+    const queued = await makeImage({ bytes: 'deleting while pending', extra: { arweave_state: 'pending' } });
+    const d = await request('DELETE', `/images/${queued.id}`, { headers: UP });
+    check('delete while merely pending goes through', d.status === 200);
+    await forever.archive(queued.id);
+    check('and the queued task finds no job and writes nothing', !(await jobs.get(queued.id)));
+
+    // The upload was already sent when the delete landed: the record must not
+    // be resurrected, only the log can say what happened.
+    const gone = await makeImage({ bytes: 'gone before landing' });
+    const jobPath = path.join(config.JOBS_DIR, `${gone.id}.json`);
+    arweave.putFile = (function wrap(inner) {
+      return async (params) => {
+        await fsp.rm(jobPath, { force: true });
+        return inner(params);
+      };
+    }(arweave.putFile));
+    await forever.archive(gone.id);
+    check('a job deleted mid-upload is not recreated as a ghost record', !fs.existsSync(jobPath));
+    await settle();
+    const restore = uploads.length;
+    arweave.putFile = async ({ filePath, contentType, tags }) => {
+      if (failUpload) throw new Error(failUpload);
+      const bytes = (await fsp.stat(filePath)).size;
+      uploads.push({ filePath, contentType, tags, bytes });
+      return { id: `${TX.slice(0, 40)}${String(uploads.length).padStart(3, '0')}`, bytes, winc: String(bytes) };
+    };
+    check('(stub restored)', uploads.length === restore);
+    void file;
+  }
+
+  // --- a stuck 'pending' can be asked again ---
+  {
+    const { id, file } = await makeImage({ bytes: 'stuck pending', extra: { arweave_state: 'pending' } });
+    const r = await request('POST', `/media/images/${file}/arweave`, { headers: AR });
+    check('asking again while pending re-queues it', r.status === 202);
+    const job = await untilState(id, ['published', 'failed']);
+    check('and it goes through', job.arweave_state === 'published');
+  }
+
+  // --- the estimate is rate limited like the POST ---
+  {
+    const { file } = await makeImage();
+    const r = await request('GET', `/media/images/${file}/arweave/estimate`, { headers: AR });
+    check('the estimate carries the rate-limit headers', r.status === 200 && r.headers.get('ratelimit-limit') === String(config.ARWEAVE_PER_HOUR));
   }
 
   // --- off ---

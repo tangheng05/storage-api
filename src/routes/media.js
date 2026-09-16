@@ -309,7 +309,7 @@ async function foreverJob(req, res) {
 
 // What Forever would cost for this file, for the confirm dialog. Never
 // queues anything.
-router.get('/:kind/:file/arweave/estimate', requireArweaveKey, async (req, res) => {
+router.get('/:kind/:file/arweave/estimate', foreverLimiter, requireArweaveKey, async (req, res) => {
   if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
   const found = await foreverJob(req, res);
   if (!found) return undefined;
@@ -343,7 +343,10 @@ router.post('/:kind/:file/arweave', foreverLimiter, requireArweaveKey, async (re
   if (job.arweave_id) {
     return res.json({ id, queued: false, already: true, ...forever.publicFields(job) });
   }
-  if (['pending', 'uploading'].includes(job.arweave_state)) {
+  // In flight: nothing to add. 'pending' is re-queued rather than trusted --
+  // the boot sweep caps how many it picks up, and a task can be lost with the
+  // process; a duplicate run is harmless, since archive() stops at an id.
+  if (job.arweave_state === 'uploading') {
     return res.status(202).json({ id, queued: true, already: true, ...forever.publicFields(job) });
   }
 
