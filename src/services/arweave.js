@@ -128,9 +128,27 @@ async function stat(id) {
   }
 }
 
+// Boot check: a wrong wallet path or an empty wallet should show up in the
+// log at start, not on the first user who clicks Forever. Never throws.
+async function verify() {
+  if (!enabled()) return null;
+  try {
+    const winc = await balance();
+    const floor = BigInt(Math.max(0, Math.floor(config.ARWEAVE_MIN_BALANCE_WINC)));
+    const level = winc <= floor ? 'error' : 'info';
+    logger[level]({ winc: winc.toString(), floor: floor.toString() }, winc <= floor
+      ? 'ARWEAVE CREDITS LOW, forever uploads will be refused'
+      : 'arweave wallet ready');
+    return winc;
+  } catch (err) {
+    logger.error({ err: err.message, jwk: config.ARWEAVE_JWK_PATH }, 'ARWEAVE WALLET UNUSABLE, forever uploads will fail');
+    return null;
+  }
+}
+
 // 43 url-safe base64 characters, the shape of every Arweave transaction id.
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 module.exports = {
-  enabled, balance, cost, estimate, putFile, stat, gatewayUrl, ID_RE,
+  enabled, balance, cost, estimate, putFile, stat, gatewayUrl, verify, ID_RE,
 };

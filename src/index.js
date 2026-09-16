@@ -26,6 +26,7 @@ const tusServer = require('./tus');
 const processor = require('./services/processor');
 const mirror = require('./services/mirror');
 const forever = require('./services/forever');
+const arweave = require('./services/arweave');
 
 processor.recoverOnBoot();
 
@@ -56,5 +57,6 @@ app.listen(config.PORT, () => {
     } catch (err) {
       logger.error({ err: err.message }, 'storage recovery sweep failed');
     }
+    arweave.verify();
   });
 });

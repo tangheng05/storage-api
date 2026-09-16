@@ -78,17 +78,40 @@ async function existingIdForCid(cid, excludeId) {
   return other ? other.arweave_id : null;
 }
 
-async function ensureOnS5(id, job) {
-  if (job.s5_cid) return job;
+// Slot states a push can be retried from. 'skipped' is a file published
+// before S5_TYPES covered its type; 'pending' is a /promote still queued.
+const PUSHABLE = ['deferred', 'failed', 'pending', 'skipped'];
+
+/*
+| Makes sure the job is on S5, and waits for it.
+|
+| The push runs on the publish lane, not here: the main API calls /promote
+| and /arweave back to back, so a promote for this very file is usually still
+| queued there. Joining that lane lands behind it instead of uploading the
+| same video beside it. The state is re-read when the turn comes, since by
+| then the promote has normally done the work.
+*/
+function ensureOnS5(id, job) {
+  if (job.s5_cid) return Promise.resolve(job);
   const state = job[mirror.SLOTS.main.state];
-  // Deferred is the common case: an editor upload nobody has promoted yet.
-  if (!['deferred', 'failed', 'pending'].includes(state)) {
-    throw new Error(`not on S5 and no push to retry (mirror_state ${state || 'unset'})`);
+  if (!PUSHABLE.includes(state)) {
+    return Promise.reject(new Error(`not on S5 and no push to retry (mirror_state ${state || 'unset'})`));
   }
-  await mirror.retry(id, { force: true, states: [state] });
-  const fresh = await jobs.get(id);
-  if (!fresh || !fresh.s5_cid) throw new Error('S5 push did not produce a CID');
-  return fresh;
+  return new Promise((resolve, reject) => {
+    queue.push(async () => {
+      try {
+        let now = await jobs.get(id);
+        if (now && !now.s5_cid && PUSHABLE.includes(now[mirror.SLOTS.main.state])) {
+          await mirror.retry(id, { force: true, states: [now[mirror.SLOTS.main.state]] });
+          now = await jobs.get(id);
+        }
+        if (!now || !now.s5_cid) throw new Error('S5 push did not produce a CID');
+        resolve(now);
+      } catch (err) {
+        reject(err);
+      }
+    }, queue.PUBLISH_LANE);
+  });
 }
 
 // The local file when we still have it, else a verified restore from S5 into
@@ -96,9 +119,10 @@ async function ensureOnS5(id, job) {
 // CID before they are paid for.
 async function sourceFor(job, file) {
   const local = mirror.localPathFor(job, file);
-  if (local && await exists(local)) return { filePath: local, temp: false };
+  if (!local) throw new Error(`no local path for media type ${job.media_type}`);
+  if (await exists(local)) return { filePath: local, temp: false };
 
-  const tmp = path.join(path.dirname(local || config.VIDEOS_DIR), `.${file}.arweave`);
+  const tmp = path.join(path.dirname(local), `.${file}.arweave`);
   await s5.getToFile({ cid: job.s5_cid, filePath: tmp });
   return { filePath: tmp, temp: true };
 }
@@ -192,6 +216,8 @@ async function enqueue(id) {
   queue.push(() => archive(id), queue.ARWEAVE_LANE);
 }
 
+// Boot only, never on a timer: it treats 'uploading' as interrupted, which is
+// only true when nothing is in flight.
 function recoverOnBoot() {
   if (!arweave.enabled()) return;
   const held = jobs.listByState(['ready'])

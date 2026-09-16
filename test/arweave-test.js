@@ -88,10 +88,19 @@ arweave.stat = async () => 'ok';
 // S5 never sees the network: putFile hashes for real and "stores" nothing,
 // stat says every CID resolves, fetchBlob fails on demand for the fallback test.
 let s5Down = false;
+let s5Pushes = 0;
+let s5Slow = 0;
 s5.putFile = async ({ filePath }) => {
+  s5Pushes += 1;
+  if (s5Slow) await new Promise((r) => setTimeout(r, s5Slow));
   const { cid, size } = await s5.hashFile(filePath);
   return { cid, bytes: size };
 };
+s5.getToFile = async ({ cid, filePath }) => {
+  await fsp.writeFile(filePath, restorable[cid] || '');
+  return { cid };
+};
+const restorable = {};
 s5.stat = async () => ({ bytes: 1 });
 s5.fetchBlob = async () => {
   if (s5Down) throw new Error('node unreachable');
@@ -255,6 +264,45 @@ async function main() {
     check('and then to Arweave', job.arweave_state === 'published');
     const up = uploads[uploads.length - 1];
     check('with the fresh CID in the tags', up.tags.some((t) => t.name === 'S5-CID' && t.value === cid));
+  }
+
+  // --- a queued /promote is joined, not raced ---
+  {
+    const queue = require('../src/services/queue');
+    const { id, file, cid } = await makeImage({ bytes: 'promote then forever', onS5: false });
+    s5Slow = 150;
+    const before = s5Pushes;
+    // What /promote does: mark pending and queue the push on the publish lane.
+    await jobs.update(id, { mirror_state: 'pending' });
+    queue.push(() => mirror.retry(id, { force: true, states: ['pending'] }), queue.PUBLISH_LANE);
+    const r = await request('POST', `/media/images/${file}/arweave`, { headers: AR });
+    check('forever asked while a promote is still queued is accepted', r.status === 202);
+    const job = await untilState(id, ['published', 'failed']);
+    s5Slow = 0;
+    check('it ends up on both', job.s5_cid === cid && job.arweave_state === 'published');
+    check('and the file went to S5 exactly once', s5Pushes - before === 1);
+  }
+
+  // --- local copy gone: restored from S5, verified, paid for, temp removed ---
+  {
+    const { id, file, filePath, cid } = await makeImage({ bytes: 'only on s5 now' });
+    restorable[cid] = 'only on s5 now';
+    await fsp.rm(filePath);
+    await request('POST', `/media/images/${file}/arweave`, { headers: AR });
+    const job = await untilState(id, ['published', 'failed']);
+    check('a file whose local copy is gone is restored from S5 and published', job.arweave_state === 'published');
+    const up = uploads[uploads.length - 1];
+    check('from a temp file beside the original', up.filePath === path.join(config.IMAGES_DIR, `.${file}.arweave`));
+    check('which is removed afterwards', !fs.existsSync(up.filePath));
+
+    const bad = await makeImage({ bytes: 'restore corrupt' });
+    restorable[bad.cid] = 'not the same bytes';
+    await fsp.rm(bad.filePath);
+    const before = uploads.length;
+    await request('POST', `/media/images/${bad.file}/arweave`, { headers: AR });
+    const bj = await untilState(bad.id, ['published', 'failed']);
+    check('a restore that does not hash to the CID is refused', bj.arweave_state === 'failed');
+    check('and never paid for', uploads.length === before);
   }
 
   // --- bytes must match the CID ---

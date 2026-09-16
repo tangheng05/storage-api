@@ -264,6 +264,52 @@ Keep `USE_X_ACCEL=false` unless you have pasted the `/internal-media/` location
 into NPM's Advanced box — nothing else honours `X-Accel-Redirect`, and premium
 delivery would return empty responses.
 
+## 7c. Forever mode (Arweave), optional
+
+Off by default and safe to deploy off: every `/arweave` route answers 503.
+Switch it on only once the normal delete path has been proven on this box, and
+after trust and safety has the "cannot be taken down" note from
+`OPERATIONS.md`.
+
+```bash
+# Generate the platform wallet on this box, then fund it with Turbo credits
+# at https://turbo-topup.com (or by sending AR to the address it prints).
+cd /opt/serey-storage-api
+node -e "require('arweave').init({}).wallets.generate().then(async (k) => {
+  require('fs').writeFileSync('/etc/serey/arweave.json', JSON.stringify(k));
+  console.log(await require('arweave').init({}).wallets.jwkToAddress(k));
+})"
+chmod 600 /etc/serey/arweave.json
+cp /etc/serey/arweave.json <somewhere off this server>   # it is money
+```
+
+Then in `.env`:
+
+```bash
+ARWEAVE_ENABLED=true
+# Its own key. The upload key is in every frontend and must not spend credits.
+ARWEAVE_API_KEY=$(openssl rand -hex 32)
+ARWEAVE_JWK_PATH=/etc/serey/arweave.json
+# Start small. Raise once the first real upload has round-tripped.
+ARWEAVE_MAX_BYTES=20971520
+# Refuse below this and log ARWEAVE CREDITS LOW.
+ARWEAVE_MIN_BALANCE_WINC=1000000000000
+```
+
+Restart and read the boot log: `arweave wallet ready` with the balance, or
+`ARWEAVE WALLET UNUSABLE` with why. Then one real image:
+
+```bash
+AR=$(grep -E '^ARWEAVE_API_KEY=' .env | cut -d= -f2-)
+curl -s http://127.0.0.1:8080/media/images/<file>/arweave/estimate -H "x-arweave-key: $AR"
+curl -s -X POST http://127.0.0.1:8080/media/images/<file>/arweave -H "x-arweave-key: $AR"
+# poll until arweave_state is published, then open arweave_url
+curl -s http://127.0.0.1:8080/images/<id>/status -H "x-upload-key: $KEY"
+```
+
+The same `ARWEAVE_API_KEY` goes into the main API's env; that side decides who
+may use Forever.
+
 ## 8. Safety-net cleanup cron
 
 The app removes expired incomplete uploads hourly on its own. Belt-and-braces:
