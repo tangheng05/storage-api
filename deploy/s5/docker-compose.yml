@@ -17,6 +17,14 @@ services:
     image: ghcr.io/s5-dev/node:latest
     container_name: s5-node
     restart: unless-stopped
+    # Docker's default soft limit is 1024. The node holds a file open per cached
+    # blob, ran out, and then could not read its own blobs back -- so every
+    # publish failed for a day while users saw nothing wrong, because /cdn falls
+    # back to local disk.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       - s3d
     # NPM is containerised and cannot reach the host's 127.0.0.1. 172.18.0.1 is

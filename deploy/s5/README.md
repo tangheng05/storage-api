@@ -95,6 +95,26 @@ have worked, presigning bug or not.
 
 `npm run test:blob` covers our side of it. Only a live node proves the rest.
 
+## The node runs out of file descriptors at Docker's default
+
+Symptom: every publish fails with `s5 stat failed: 500`, and the node logs
+`Cannot open file ... Too many open files, errno = 24`. `putFile` verifies the
+blob is retrievable before reporting success, so a node that cannot read its
+own cache rejects every upload.
+
+Users notice nothing, because `/cdn` falls back to local disk. The only visible
+sign is `mirror_state: failed` accumulating on jobs.
+
+The compose file pins `nofile` to 65536. Check a running container with:
+
+    PID=$(docker inspect -f '{{.State.Pid}}' s5-node)
+    grep -i 'open files' /proc/$PID/limits
+    ls /proc/$PID/fd | wc -l
+
+`docker compose up -d s5` is required to apply a ulimit change; `restart` is not
+enough. Afterwards restart the storage API -- its boot sweep republishes every
+slot left in 'failed'.
+
 ## s3d holds bytes back until a batch fills
 
 `s3d status` reports an upload pipeline, and a fresh object lands in
