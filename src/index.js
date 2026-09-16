@@ -25,6 +25,7 @@ const app = require('./app');
 const tusServer = require('./tus');
 const processor = require('./services/processor');
 const mirror = require('./services/mirror');
+const forever = require('./services/forever');
 
 processor.recoverOnBoot();
 
@@ -51,6 +52,7 @@ app.listen(config.PORT, () => {
   setImmediate(() => {
     try {
       mirror.recoverOnBoot();
+      forever.recoverOnBoot();
     } catch (err) {
       logger.error({ err: err.message }, 'storage recovery sweep failed');
     }

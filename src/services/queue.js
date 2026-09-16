@@ -13,6 +13,7 @@ const MEDIA_LANE = 'media'; // ffmpeg: video remux/transcode, audio transcode
 const IMAGE_LANE = 'image'; // sharp: fast, must not wait behind the above
 const PUBLISH_LANE = 'sia'; // retrying failed storage pushes, off the live-upload path
 const SCAN_LANE = 'scan'; // scan gate + storage push; network I/O, off the ffmpeg/sharp lanes
+const ARWEAVE_LANE = 'arweave'; // Turbo uploads: minutes for a video, must not sit in front of S5 pushes
 
 const lanes = new Map();
 
@@ -52,4 +53,5 @@ module.exports = {
   IMAGE_LANE,
   PUBLISH_LANE,
   SCAN_LANE,
+  ARWEAVE_LANE,
 };

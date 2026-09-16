@@ -2,6 +2,7 @@ const express = require('express');
 const { Readable } = require('stream');
 const config = require('../config');
 const resolve = require('../services/resolve');
+const arweave = require('../services/arweave');
 const logger = require('../services/logger');
 
 const router = express.Router();
@@ -51,6 +52,12 @@ router.all('/:kind/:file', async (req, res) => {
       { id: found.id, kind: found.kind, cid: found.cid, err: err.message },
       'cdn fetch from s5 failed',
     );
+    // Forever media has a second copy. Only on failure, never as the primary:
+    // public gateways throttle video, and the redirect must not be cached.
+    if (found.job && found.job.arweave_id) {
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, arweave.gatewayUrl(found.job.arweave_id));
+    }
     return res.status(502).json({ error: 'Upstream unavailable' });
   }
 

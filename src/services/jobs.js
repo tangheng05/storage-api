@@ -68,13 +68,17 @@ function listByState(states) {
 */
 async function usedByOther(cid, excludeId) {
   if (!cid) return false;
-  let names;
   try {
-    names = await fsp.readdir(config.JOBS_DIR);
+    return !!(await findOther(excludeId, (job) => job.s5_cid === cid || job.s5_thumb_cid === cid));
   } catch {
     // Cannot prove the blob is unshared, so the caller must not delete it.
     return true;
   }
+}
+
+// First other job matching `predicate`, or null. Same full scan; rare callers only.
+async function findOther(excludeId, predicate) {
+  const names = await fsp.readdir(config.JOBS_DIR);
   for (const name of names) {
     if (!name.endsWith('.json') || name === `${excludeId}.json`) continue;
     let job;
@@ -84,11 +88,11 @@ async function usedByOther(cid, excludeId) {
     } catch {
       continue;
     }
-    if (job && (job.s5_cid === cid || job.s5_thumb_cid === cid)) return true;
+    if (job && predicate(job)) return job;
   }
-  return false;
+  return null;
 }
 
 module.exports = {
-  create, get, update, remove, listByState, usedByOther, ULID_REGEX,
+  create, get, update, remove, listByState, usedByOther, findOther, ULID_REGEX,
 };

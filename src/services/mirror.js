@@ -62,9 +62,11 @@ const isImmutable = targetsS5;
 
 // Null unless S5_EXPOSE_CID: a CID handed to a client can be fetched from any
 // S5 node forever with no route back, so exposing it can't be undone later.
+// A forever job is the exception: its CID is already public in the Arweave
+// data item's tags, and the main API needs it for the chain record.
 function publicCid(job) {
-  if (!config.S5_EXPOSE_CID) return null;
   if (!job || job.visibility === 'private') return null;
+  if (!config.S5_EXPOSE_CID && !job.arweave_id) return null;
   return job.s5_cid || null;
 }
 
@@ -349,6 +351,10 @@ async function purge(job) {
 
     if (done.length) report[slot] = done.join(', ');
   }
+
+  // Not a step that ran: a statement of what cannot be done. Our copies are
+  // gone; the data item is not ours to remove, and the caller must say so.
+  if (job.arweave_id) report.arweave = `permanent:${job.arweave_id}`;
 
   return report;
 }

@@ -55,6 +55,25 @@ function requireModerationKey(req, res, next) {
   return next();
 }
 
+// Same reasoning as moderation, with money attached: every accepted call
+// spends Turbo credits on a copy nobody can ever delete. Read from its own
+// header first so a caller can present the upload key alongside it.
+function requireArweaveKey(req, res, next) {
+  if (!config.ARWEAVE_API_KEY) {
+    return res.status(503).json({ error: 'Permanent storage is not configured' });
+  }
+  const provided = req.headers[config.ARWEAVE_KEY_HEADER] || extractProvidedKey(req);
+  if (!safeEqual(provided, config.ARWEAVE_API_KEY)) {
+    return res.status(401).json({ error: 'Invalid or missing arweave key' });
+  }
+  return next();
+}
+
 module.exports = {
-  isAuthorized, matchesUploadToken, requireUploadKey, requireModerationKey, safeEqual,
+  isAuthorized,
+  matchesUploadToken,
+  requireUploadKey,
+  requireModerationKey,
+  requireArweaveKey,
+  safeEqual,
 };

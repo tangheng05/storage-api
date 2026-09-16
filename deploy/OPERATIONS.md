@@ -37,9 +37,15 @@ ls /proc/$PID/fd | wc -l
 
 # 4. disk
 df -h /
+
+# 5. forever uploads that failed -- ARWEAVE CREDITS LOW in the log means top up
+grep -l '"arweave_state": "failed"' "$JOBS"/*.json 2>/dev/null | wc -l
 ```
 
-A non-zero count in (1) means media exists in one place only.
+A non-zero count in (1) means media exists in one place only. A non-zero count
+in (5) is a user who asked for Forever and did not get it; the job's
+`arweave_error` says why, and asking again (`POST .../arweave`) retries it.
+Nothing retries on its own, because every attempt costs credits.
 
 ## Known failures
 
@@ -75,6 +81,16 @@ then.
 
 A purge failure never fails the delete: the bytes are already gone by then, so
 the right answer is to report it, not to unwind.
+
+### Forever media cannot be taken down
+
+A job with an `arweave_id` has a copy on Arweave that nobody can remove, us
+included. Delete still works and still removes every copy we hold; the report
+adds `"arweave":"permanent:<id>"` so the caller can say so. A legal request
+gets exactly that answer: our copies are gone, the site no longer serves it,
+the Arweave copy is outside anyone's control. Write that down for trust and
+safety before Forever is switched on, and never build a tool that pretends
+otherwise.
 
 ### Cache Assets must stay off
 
@@ -114,9 +130,12 @@ else substitutes.
 |---|---|
 | `/var/lib/s3d/s3d.yml` | the 12-word recovery phrase. Everything on Sia is encrypted to it. |
 | `/var/lib/s5/config/config.toml` | the node's keypair seed |
+| `ARWEAVE_JWK_PATH` (if Forever is on) | the platform Arweave wallet. Holds the Turbo credits; anyone with it can spend them. |
 
 Keep a copy off the server. Losing the phrase loses every stored file, not just
-the ability to serve them.
+the ability to serve them. The wallet is the opposite case: nothing already on
+Arweave depends on it, but it is money, so keep it in a secrets store and out
+of `.env`, and give it two-person access.
 
 Also worth carrying, but rebuildable: `JOBS_DIR` (the job records, which hold
 every CID and s3d key), the media directories, and `.env`.

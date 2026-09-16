@@ -142,6 +142,31 @@ module.exports = {
   S5_BLOB_S3_SECRET_KEY: process.env.S5_BLOB_S3_SECRET_KEY || '',
   S5_BLOB_CACHE_SEC: num(process.env.S5_BLOB_CACHE_SEC, 31536000),
 
+  // Forever mode: a second copy on Arweave, paid once from a platform wallet and
+  // impossible to delete afterwards, even by us. Public media only, and only
+  // after it is on S5 -- the S5 CID goes into the data item's tags.
+  ARWEAVE_ENABLED: process.env.ARWEAVE_ENABLED === 'true',
+  // Its own key, not the upload key: that one sits in every frontend and phone
+  // app, and must not be able to spend Turbo credits. The main API decides who
+  // may go forever and is the only holder. Unset means the route is off (503).
+  ARWEAVE_API_KEY: process.env.ARWEAVE_API_KEY || '',
+  ARWEAVE_KEY_HEADER: 'x-arweave-key',
+  // A file path, never the JSON itself: env values end up in pm2 dumps and
+  // crash logs, and this wallet holds real money.
+  ARWEAVE_JWK_PATH: process.env.ARWEAVE_JWK_PATH ? path.resolve(process.env.ARWEAVE_JWK_PATH) : '',
+  ARWEAVE_TYPES: csv(process.env.ARWEAVE_TYPES, 'image,video,audio'),
+  // Price cap per file. 0 means no cap, which is a bad idea before pricing is settled.
+  ARWEAVE_MAX_BYTES: num(process.env.ARWEAVE_MAX_BYTES, 500 * 1024 * 1024),
+  // Refuse below this rather than fail mid-upload; ops tops up on the log line.
+  ARWEAVE_MIN_BALANCE_WINC: num(process.env.ARWEAVE_MIN_BALANCE_WINC, 0),
+  // Public gateways for the /cdn fallback. Never the primary: they throttle video.
+  ARWEAVE_GATEWAYS: csv(process.env.ARWEAVE_GATEWAYS, 'https://arweave.net'),
+  ARWEAVE_TIMEOUT_MS: num(process.env.ARWEAVE_TIMEOUT_MS, 30 * 60 * 1000),
+  // Per IP on the POST. Every accepted call costs money, so the cost attack
+  // in the guideline's §10 is real even for a key holder.
+  ARWEAVE_PER_HOUR: num(process.env.ARWEAVE_PER_HOUR, 200),
+  ARWEAVE_RECOVER_LIMIT: num(process.env.ARWEAVE_RECOVER_LIMIT, 50),
+
   // The main API freezes this into post rows permanently, so never let a raw CID or portal domain into it.
   MEDIA_CDN_BASE_URL: trimSlash(process.env.MEDIA_CDN_BASE_URL) || `${PUBLIC_BASE_URL}/cdn`,
   // How long a takedown takes to clear Cloudflare's edge; purge the CF cache too if it must be immediate.

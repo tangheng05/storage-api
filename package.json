@@ -1,14 +1,14 @@
 {
   "name": "media-storage-api",
   "version": "1.0.0",
-  "description": "Resumable media upload and storage API: tus uploads, ffmpeg/sharp normalisation, content scanning, and content-addressed publishing to Sia via S5.",
+  "description": "Resumable media upload and storage API: tus uploads, ffmpeg/sharp normalisation, content scanning, and content-addressed publishing to Sia via S5, with an optional permanent copy on Arweave.",
   "private": true,
   "license": "MIT",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js && node test/s5-purge-test.js && node test/cdn-purge-test.js && node test/document-test.js && node test/archive-test.js",
+    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js && node test/s5-purge-test.js && node test/cdn-purge-test.js && node test/document-test.js && node test/archive-test.js && node test/arweave-test.js",
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
     "test:blob": "node test/s5-blob-test.js",
@@ -16,7 +16,8 @@
     "test:document": "node test/document-test.js",
     "test:archive": "node test/archive-test.js",
     "test:purge": "node test/s5-purge-test.js",
-    "test:cdn": "node test/cdn-purge-test.js"
+    "test:cdn": "node test/cdn-purge-test.js",
+    "test:arweave": "node test/arweave-test.js"
   },
   "repository": {
     "type": "git",
@@ -26,6 +27,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@ardrive/turbo-sdk": "^1.43.0",
     "@aws-sdk/client-s3": "^3.967.0",
     "@aws-sdk/lib-storage": "^3.967.0",
     "@noble/hashes": "^1.8.0",
@@ -46,5 +48,10 @@
   "devDependencies": {
     "tus-js-client": "^4.3.1",
     "yauzl": "^3.4.0"
+  },
+  "overrides": {
+    "rpc-websockets": {
+      "uuid": "^11.1.0"
+    }
   }
 }

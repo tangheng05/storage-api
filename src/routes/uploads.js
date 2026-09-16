@@ -6,6 +6,7 @@ const jobs = require('../services/jobs');
 const mirror = require('../services/mirror');
 const cdnCache = require('../services/cdn');
 const scan = require('../services/scan');
+const forever = require('../services/forever');
 const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middleware/auth');
 
 // Builds the status/delete router for one media type (video, audio, image).
@@ -71,6 +72,7 @@ function makeRouter(kind) {
         s5_cid: mirror.publicCid(job),
         scan_reasons: scan.publicReasons(job),
         scan_message: scan.publicMessage(job),
+        ...forever.publicFields(job),
       });
     } catch (err) {
       return next(err);
@@ -101,7 +103,8 @@ function makeRouter(kind) {
       ]);
 
       // Returned, not swallowed: caller needs to know whether it's really
-      // deleted (s3d) or merely unpinned (S5) before telling a user it's gone.
+      // deleted (s3d), merely unpinned (S5), or still on Arweave for good
+      // before telling a user it's gone.
       const storage = await mirror.purge(job);
 
       // After the bytes are gone, so a purge can never beat the deletion and

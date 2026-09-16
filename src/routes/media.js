@@ -1,15 +1,18 @@
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 
 const config = require('../config');
 const jobs = require('../services/jobs');
 const logger = require('../services/logger');
-const { requireUploadKey } = require('../middleware/auth');
+const { requireUploadKey, requireArweaveKey } = require('../middleware/auth');
 const { verify } = require('../utils/signed_url');
 const sia = require('../services/sia');
 const mirror = require('../services/mirror');
 const queue = require('../services/queue');
+const forever = require('../services/forever');
+const arweave = require('../services/arweave');
 const { exists } = require('../utils/fs');
 
 const router = express.Router();
@@ -263,6 +266,95 @@ router.post('/:kind/:file/promote', requireUploadKey, async (req, res) => {
 
   logger.info({ id, kind, thumb: hasThumb }, 'promotion queued');
   return res.status(202).json({ id, promoted: true, queued: true, url: job.url });
+});
+
+/*
+| Forever mode. Both routes take the arweave key, not the upload key, and both
+| answer through forever.refusal so the estimate can never say yes to a file
+| the POST then turns down.
+|
+| Who may go forever is the main API's decision -- membership, a fee, a quota,
+| whatever it wants. This service knows no users; the separate key is what
+| keeps that decision from being bypassed by anyone holding the upload key.
+*/
+const foreverLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: config.ARWEAVE_PER_HOUR,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many permanent-storage requests, try again later' },
+});
+
+async function foreverJob(req, res) {
+  const parsed = parseFile(req.params.kind, req.params.file);
+  if (!parsed) {
+    res.status(400).json({ error: 'Invalid media reference' });
+    return null;
+  }
+  let job;
+  try {
+    job = await jobs.get(parsed.id);
+  } catch {
+    res.status(409).json({ error: 'job_unreadable' });
+    return null;
+  }
+  const refused = await forever.refusal(job, { kind: req.params.kind });
+  if (refused) {
+    const { status, ...body } = refused;
+    res.status(status).json(body);
+    return null;
+  }
+  return { ...parsed, job };
+}
+
+// What Forever would cost for this file, for the confirm dialog. Never
+// queues anything.
+router.get('/:kind/:file/arweave/estimate', requireArweaveKey, async (req, res) => {
+  if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
+  const found = await foreverJob(req, res);
+  if (!found) return undefined;
+  const { id, job } = found;
+  if (job.arweave_id) {
+    return res.json({ id, already: true, ...forever.publicFields(job) });
+  }
+  try {
+    const quote = await arweave.estimate(await forever.bytesOf(job));
+    return res.json({ id, already: false, ...quote });
+  } catch (err) {
+    logger.error({ id, err: err.message }, 'arweave estimate failed');
+    return res.status(502).json({ error: 'arweave_estimate_failed' });
+  }
+});
+
+/*
+| Accepted, not done, like /promote: the upload takes minutes for a video and
+| the caller polls /status for arweave_state. Idempotent -- a job that already
+| has an id answers 200 with it, and one already queued is not queued twice.
+|
+| The S5 push runs first if it has not happened (a deferred editor upload):
+| the CID goes into the data item's tags, so Arweave cannot come first.
+*/
+router.post('/:kind/:file/arweave', foreverLimiter, requireArweaveKey, async (req, res) => {
+  if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
+  const found = await foreverJob(req, res);
+  if (!found) return undefined;
+  const { id, job } = found;
+
+  if (job.arweave_id) {
+    return res.json({ id, queued: false, already: true, ...forever.publicFields(job) });
+  }
+  if (['pending', 'uploading'].includes(job.arweave_state)) {
+    return res.status(202).json({ id, queued: true, already: true, ...forever.publicFields(job) });
+  }
+
+  try {
+    await forever.enqueue(id);
+  } catch (err) {
+    logger.error({ id, err: err.message }, 'could not queue arweave upload');
+    return res.status(500).json({ error: 'could_not_queue_arweave' });
+  }
+  logger.info({ id, kind: req.params.kind }, 'arweave upload queued');
+  return res.status(202).json({ id, queued: true, arweave_state: 'pending', url: job.url });
 });
 
 // No membership logic by design: the main API decides who is entitled and proves

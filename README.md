@@ -5,7 +5,8 @@ Resumable upload and storage for video, audio and images. Files arrive over
 sharp), get scanned, then published.
 
 Public files go to **S5**, a content-addressing layer over
-[Sia](https://sia.tech). Sia splits and encrypts a file across independent
+[Sia](https://sia.tech), and optionally get a permanent second copy on
+[Arweave](https://arweave.org). Sia splits and encrypts a file across independent
 hosts; S5 names it with a **CID**, the file's BLAKE3 hash. The hash is the
 address, so anyone can verify the bytes they received. Change one byte and the
 address changes, so a file cannot be swapped under a name that stays the same.
@@ -65,6 +66,37 @@ so the CID stops resolving. S5 documents no unpin, but the bucket is ours. A
 blob another job still references is left alone -- identical uploads are one
 stored file, so deleting for one job would take the other's bytes with it.
 
+## Forever
+
+Off unless `ARWEAVE_ENABLED`. A public file that is already on S5 can get a
+second copy on **Arweave**, uploaded through Turbo and paid once from a
+platform wallet. That copy has no unpin and no delete, not even for us. S5
+stays the player and the `/cdn` URL does not change; Arweave is the archive,
+and the fallback `/cdn` redirects to when S5 is down.
+
+```
+POST /media/:kind/:file/arweave     202, then poll /status for arweave_state
+GET  /media/:kind/:file/arweave/estimate   cost in winc (and USD) before asking
+```
+
+Both take `x-arweave-key: <ARWEAVE_API_KEY>`, **not** the upload key. This
+service knows no users, so who may go forever -- a membership, a fee, a quota
+-- is the main API's decision, and a separate key is what stops anyone holding
+the upload key from spending credits around it.
+
+The bytes are hashed against the S5 CID before they are paid for, so the
+`S5-CID` tag on the data item is always true; a deferred upload is pushed to
+S5 first. Identical bytes reuse one data item. Paywalled media, anything not
+`ready`, and anything over `ARWEAVE_MAX_BYTES` are refused. A failed upload
+stays `failed` until asked again: every attempt costs money. An upload
+interrupted by a restart is marked failed too, since a blind retry could pay
+twice.
+
+`DELETE` still removes every copy we hold and reports `arweave: permanent:<id>`
+so the caller can tell the user what did not go. `s5_cid` is shown for a
+forever job whatever `S5_EXPOSE_CID` says: it is already public in the data
+item's tags, and the main API needs it for the chain record.
+
 ## Auth
 
 `x-upload-key: <UPLOAD_API_KEY>` on every upload, status and delete.
@@ -84,6 +116,8 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | GET | `/media/:kind/:file` | paid delivery, signed URL required |
 | POST | `/media/:kind/:file/visibility` | flip public/private; 409 once on S5 |
 | POST | `/media/:kind/:file/promote` | queue the S5 push (202); idempotent |
+| POST | `/media/:kind/:file/arweave` | queue the Arweave copy (202); arweave key |
+| GET | `/media/:kind/:file/arweave/estimate` | what that would cost; arweave key |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
 | POST | `/documents` | archive raw text, returns its sha256 |
 | GET | `/documents/:id` | read it back; master key only |
@@ -95,7 +129,9 @@ unable to delete, so a browser or an auditor can poll without the shared key
 
 States: `uploading → queued → processing → scanning → ready | rejected |
 failed`. `scan_reasons` is populated only on `rejected`. `s5_cid` needs
-`S5_EXPOSE_CID=true` and is permanent once shown.
+`S5_EXPOSE_CID=true` (or a forever job) and is permanent once shown.
+`arweave_state` is `pending → uploading → published | failed`, with
+`arweave_id` and `arweave_url` once published.
 
 ## Limits
 
