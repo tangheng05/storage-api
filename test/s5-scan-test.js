@@ -6,6 +6,8 @@
 | and above all that a file failing the scan never reaches a served directory
 | or a backend. The unpin route remains undocumented and unproven.
 */
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const http = require('http');
 const fs = require('fs');
 const fsp = require('fs/promises');

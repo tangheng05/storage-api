@@ -1,4 +1,7 @@
-require('dotenv').config();
+// Tests set STORAGE_TEST. dotenv does not override what a test already set, but
+// it does fill in everything a test did not -- so without this a suite passes on
+// a bare checkout and fails on a configured box, reading real timeouts and keys.
+if (process.env.STORAGE_TEST !== '1') require('dotenv').config();
 
 const path = require('path');
 

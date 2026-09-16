@@ -1,5 +1,7 @@
 // Lane concurrency: the scan lane runs several tasks at once because it waits
 // on the network, while the ffmpeg/sharp lanes must stay strictly serial.
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const assert = require('assert');
 
 process.env.UPLOAD_API_KEY = 'queue-test';

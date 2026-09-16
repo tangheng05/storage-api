@@ -8,6 +8,8 @@
 |
 | Run: node test/archive-test.js
 */
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');

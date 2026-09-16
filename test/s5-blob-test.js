@@ -6,6 +6,8 @@
 | key, the `.obao` sibling, 256KB ranged reads, and cross-origin access. It
 | does NOT prove s3d behaves this way, or that a live S5 node is happy.
 */
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const http = require('http');
 const assert = require('assert');
 

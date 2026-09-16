@@ -6,6 +6,8 @@
 | round trips, visibility moves, purge, outage fallback -- NOT that Sia's own
 | s3d gateway behaves this way; only real credentials can prove that.
 */
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const http = require('http');
 const fs = require('fs');
 const os = require('os');

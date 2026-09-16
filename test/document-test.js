@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /* Document store test: node test/document-test.js
  * Drives routes/documents.js over HTTP against an in-process S3 stub. */
+// Ignore any .env on this machine: a suite must not read production config.
+process.env.STORAGE_TEST = '1';
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
