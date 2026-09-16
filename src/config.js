@@ -147,6 +147,13 @@ module.exports = {
   // How long a takedown takes to clear Cloudflare's edge; purge the CF cache too if it must be immediate.
   MEDIA_CDN_CACHE_SEC: num(process.env.MEDIA_CDN_CACHE_SEC, 3600),
 
+  // Deleting the bytes does not reach the edge, which keeps serving its copy
+  // until the entry expires. Both unset means a delete is only complete once
+  // that happens. The token needs the cache-purge permission and nothing else.
+  CLOUDFLARE_ZONE_ID: process.env.CLOUDFLARE_ZONE_ID || '',
+  CLOUDFLARE_PURGE_TOKEN: process.env.CLOUDFLARE_PURGE_TOKEN || '',
+  CDN_PURGE_TIMEOUT_MS: num(process.env.CDN_PURGE_TIMEOUT_MS, 10000),
+
   // Gate is at publication, not the storage push -- a failed file must not be reachable anywhere.
   SCAN_ENABLED: process.env.SCAN_ENABLED === 'true',
   // Cheapest first; any single reject wins, so order only affects cost.

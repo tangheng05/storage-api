@@ -4,6 +4,7 @@ const path = require('path');
 const config = require('../config');
 const jobs = require('../services/jobs');
 const mirror = require('../services/mirror');
+const cdnCache = require('../services/cdn');
 const scan = require('../services/scan');
 const { requireUploadKey, isAuthorized, matchesUploadToken } = require('../middleware/auth');
 
@@ -103,8 +104,12 @@ function makeRouter(kind) {
       // deleted (s3d) or merely unpinned (S5) before telling a user it's gone.
       const storage = await mirror.purge(job);
 
+      // After the bytes are gone, so a purge can never beat the deletion and
+      // let the edge re-cache what it just dropped.
+      const cdn = await cdnCache.purge([job.url, job.thumbnail_url]);
+
       await jobs.remove(id);
-      return res.json({ deleted: id, storage });
+      return res.json({ deleted: id, storage, cdn });
     } catch (err) {
       return next(err);
     }

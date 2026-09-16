@@ -57,6 +57,24 @@ the old limit.
 After fixing any backend outage, restart the storage API. Its boot sweep
 republishes every slot left in `failed`; nothing has to be done by hand.
 
+## Taking content down
+
+Deleting media removes the local file, the backend copy, and -- when
+`CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_PURGE_TOKEN` are set -- the edge copy. The
+response says what happened to each:
+
+```json
+{"deleted":"<id>","storage":{"main":"s5:deleted"},"cdn":"purged"}
+```
+
+`cdn: failed` or `not-configured` means the bytes are gone but the edge is
+still serving them until the entry expires. Purge by URL in the Cloudflare
+dashboard (Caching -> Purge Cache) and treat the takedown as unfinished until
+then.
+
+A purge failure never fails the delete: the bytes are already gone by then, so
+the right answer is to report it, not to unwind.
+
 ## What must survive a move
 
 Two files. Lose either and the data is unrecoverable — no backup of anything
