@@ -76,6 +76,7 @@ const CONTENT_TYPES = {
   '.webm': 'video/webm',
   '.m4a': 'audio/mp4',
   '.jpg': 'image/jpeg',
+  '.json': 'application/json; charset=utf-8',
 };
 
 function contentTypeFor(file) {

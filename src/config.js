@@ -58,6 +58,13 @@ module.exports = {
     './data/private/images',
   ),
 
+  // Post bodies. Never publicly served, and never S5: stored to stay deletable.
+  DOCUMENTS_DIR: resolveDir(process.env.DOCUMENTS_DIR, './data/documents'),
+  MAX_DOCUMENT_BYTES: num(process.env.MAX_DOCUMENT_BYTES, 2 * 1024 * 1024),
+  // Per IP. The only caller is the main API, so this is a runaway-loop and
+  // disk-fill guard, not a user-facing quota.
+  DOCUMENTS_PER_HOUR: num(process.env.DOCUMENTS_PER_HOUR, 2000),
+
   // Shared with the main API, which mints the signatures. Empty means /media/ serves nothing.
   MEDIA_SIGNING_SECRET: process.env.MEDIA_SIGNING_SECRET || '',
   USE_X_ACCEL: process.env.USE_X_ACCEL === 'true',

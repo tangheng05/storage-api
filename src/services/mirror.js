@@ -34,6 +34,9 @@ const SLOTS = {
 
 // null means local disk only, which is a supported state.
 function backendFor({ mediaType, visibility = 'public' }) {
+  // Before the visibility branch so no flag combination sends text to S5,
+  // which can never erase anything.
+  if (mediaType === 'document') return sia.enabled() ? 's3d' : null;
   if (visibility === 'private') {
     return sia.enabled() && config.SIA_MIRROR_TYPES.includes(mediaType) ? 's3d' : null;
   }
@@ -129,7 +132,7 @@ async function publish({
   } catch (err) {
     logger.error({ id, backend, slot, err: err.message }, 'publish failed, serving locally');
     return {
-      url: null,
+      url: backend === 's5' ? publicUrl('s5', kind, file) : null,
       patch: {
         [fields.backend]: backend,
         // Recorded even on failure so the retry knows where it was headed.
@@ -196,7 +199,9 @@ async function retry(id, { force = false, states = null } = {}) {
   }
 }
 
-const KINDS = { video: 'videos', audio: 'audio', image: 'images' };
+const KINDS = {
+  video: 'videos', audio: 'audio', image: 'images', document: 'documents',
+};
 function kindFor(mediaType) {
   return KINDS[mediaType] || 'videos';
 }
@@ -213,6 +218,9 @@ function fileFromJob(job) {
 function localPathFor(job, file) {
   const priv = job.visibility === 'private';
   switch (job.media_type) {
+    // One directory: a document has no public variant.
+    case 'document':
+      return path.join(config.DOCUMENTS_DIR, file);
     case 'image':
       return path.join(priv ? config.PRIVATE_IMAGES_DIR : config.IMAGES_DIR, file);
     case 'audio':

@@ -52,6 +52,9 @@ mkdir -p /var/www/serey-videos/private/{videos,audio,images}
 # the published dirs, or the pending -> published move becomes a cross-device
 # copy. nginx must not serve it.
 mkdir -p /var/www/serey-videos/pending/{videos,audio,images,thumbnails}
+# Post bodies, archived so a takedown can delete them. nginx must NOT serve
+# this directory -- it is reached only through the /documents route.
+mkdir -p /var/lib/serey-storage/documents
 chown -R serey-storage:serey-storage /var/lib/serey-storage /var/www/serey-videos
 ```
 
@@ -78,6 +81,7 @@ PUBLIC_BASE_URL=https://media.example.com
 UPLOAD_API_KEY=<GENERATE: openssl rand -hex 32>
 TUS_DIR=/var/lib/serey-storage/tus
 JOBS_DIR=/var/lib/serey-storage/jobs
+DOCUMENTS_DIR=/var/lib/serey-storage/documents
 VIDEOS_DIR=/var/www/serey-videos/videos
 THUMBS_DIR=/var/www/serey-videos/thumbnails
 AUDIO_DIR=/var/www/serey-videos/audio

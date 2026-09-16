@@ -9,6 +9,7 @@ const tusServer = require('./tus');
 const uploadsRouter = require('./routes/uploads');
 const mediaRouter = require('./routes/media');
 const cdnRouter = require('./routes/cdn');
+const documentsRouter = require('./routes/documents');
 const archiveRouter = require('./routes/archive');
 const blobRouter = require('./routes/blob');
 const moderationRouter = require('./routes/moderation');
@@ -108,6 +109,23 @@ const moderationLimiter = rateLimit({
 });
 app.use('/moderation', moderationLimiter, express.json({ limit: '8kb' }), moderationRouter);
 app.use('/cdn', cdnRouter);
+// Raw, not json-parsed: the sha256 must cover the exact bytes sent. No
+// express.static counterpart below, by design.
+// Limited for the same reason as /moderation: nginx forwards this straight
+// here, so the key check is the only barrier and each POST costs disk.
+const documentLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: config.DOCUMENTS_PER_HOUR,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many document writes, try again later' },
+});
+app.use(
+  '/documents',
+  documentLimiter,
+  express.raw({ type: '*/*', limit: config.MAX_DOCUMENT_BYTES }),
+  documentsRouter,
+);
 // Export archives. The POST is master-key gated; the GET is the ticket itself,
 // because a browser cannot put a secret header on a download it navigates to.
 app.use('/archive', archiveRouter);

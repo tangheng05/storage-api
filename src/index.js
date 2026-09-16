@@ -16,6 +16,7 @@ const logger = require('./services/logger');
   config.PENDING_AUDIO_DIR,
   config.PENDING_IMAGES_DIR,
   config.PENDING_THUMBS_DIR,
+  config.DOCUMENTS_DIR,
 ].forEach((dir) => {
   fs.mkdirSync(dir, { recursive: true });
 });

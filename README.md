@@ -45,6 +45,21 @@ goes must not defer: nothing would ever call `/promote` and its files would
 never reach Sia. `S5_PROMOTE_ON_PUBLISH` sets the default for uploads that say
 nothing, and should stay off for that reason.
 
+## Documents
+
+Post bodies and other text, held so they can be **deleted**. `POST /documents`
+writes the bytes, pushes a copy to s3d under `private/documents/` and returns
+their sha256; the caller publishes that hash and keeps the id. `DELETE` removes
+both copies and reports what happened to each.
+
+s3d bin-packs small objects before uploading, so a few KB of post body does not
+cost a whole 4 MiB sector. It also buffers on local disk first, so a successful
+write means s3d accepted the bytes, not that they are on Sia yet.
+
+Documents never reach S5 and are never publicly served. The hash is a
+commitment, not an address: it proves the bytes, and once they are gone it
+resolves to nothing. That is the whole difference from a CID.
+
 ## Auth
 
 `x-upload-key: <UPLOAD_API_KEY>` on every upload, status and delete.
@@ -65,6 +80,9 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | POST | `/media/:kind/:file/visibility` | flip public/private; 409 once on S5 |
 | POST | `/media/:kind/:file/promote` | queue the S5 push (202); idempotent |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
+| POST | `/documents` | archive raw text, returns its sha256 |
+| GET | `/documents/:id` | read it back; master key only |
+| DELETE | `/documents/:id` | destroy it, on disk and on s3d |
 | GET | `/blob/1/:name` | S5 blob store, read-only, for S5 peers |
 | POST | `/moderation/blocklist` | blocklist a hash by `phash` or job id |
 | GET | `/moderation/stats` | verdict counts and thresholds |
