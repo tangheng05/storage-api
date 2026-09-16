@@ -50,6 +50,7 @@ A non-zero count in (1) means media exists in one place only.
 | `s3d status` shows Pending climbing, Uploaded flat | s3d batches until a slab fills | hourly `s3d flush` cron; see [s5/README.md](s5/README.md) |
 | Every read fails, node reports an integrity error | `cdnUrls` unset, so S5 reads via presigned URLs that s3d refuses | set `cdnUrls` in the node's `config.toml`, `S5_BLOB_ENABLED=true` |
 | Build killed, exit 137 | out of memory, no swap | add swap, `NODE_OPTIONS=--max-old-space-size=3072` |
+| A deleted file still returns 200 while the origin returns 404 | Nginx Proxy Manager's **Cache Assets** toggle | turn it off on the proxy host; see below |
 
 A ulimit change needs `docker compose up -d`, not `restart` — a restart keeps
 the old limit.
@@ -74,6 +75,35 @@ then.
 
 A purge failure never fails the delete: the bytes are already gone by then, so
 the right answer is to report it, not to unwind.
+
+### Cache Assets must stay off
+
+Nginx Proxy Manager's **Cache Assets** toggle (proxy host -> Details -> Options)
+holds its own copy of anything ending in an image, font or script extension,
+and its generated block sets `proxy_ignore_headers Cache-Control Expires` with
+`proxy_cache_valid 200 1M`. Two consequences, both silent:
+
+- **Takedowns cannot work.** Purging Cloudflare evicts the edge, Cloudflare
+  refetches, and NPM answers from its month-old copy -- so the edge refills with
+  the file you just deleted. This is not a Cloudflare problem and no purge fixes
+  it. Diagnosed once by hitting each layer separately; that is the only way to
+  see it, since every layer reports success.
+- **Premium images leak.** They are served from `/media/<kind>/<ulid>.<ext>`, so
+  they match the extension rule, and the `private, no-store` that protects them
+  is one of the headers being ignored. An expired signed URL replayed verbatim
+  is then served from cache without the signature ever being checked.
+
+To check which layer is actually answering:
+
+```bash
+curl -s -o /dev/null -D- http://127.0.0.1:8080/cdn/images/<id>.<ext>   # the app
+curl -sk -o /dev/null -D- --resolve storage.serey.io:443:127.0.0.1 \
+  https://storage.serey.io/cdn/images/<id>.<ext>                      # the proxy
+curl -sI https://storage.serey.io/cdn/images/<id>.<ext>               # the edge
+```
+
+The app 404ing while either layer above it returns 200 is the signature of this
+failure. `x-served-by` in a response means the proxy answered.
 
 ## What must survive a move
 
@@ -101,7 +131,9 @@ every CID and s3d key), the media directories, and `.env`.
    `.env`.
 4. Bring up s3d and the S5 node. Confirm `docker exec s3d s3d status` reports
    the same Uploaded count as the old box.
-5. Start the storage API. Run the health check above.
+5. Start the storage API. Run the health check above. On the new proxy host,
+   confirm **Cache Assets is off** -- it defaults on for new hosts and breaks
+   takedowns.
 6. Publish one test upload and confirm it gets a CID before pointing DNS over.
 7. `node scripts/storage-verify.js` — checks every published job is still
    present on its backend. `--fix` re-pushes anything missing.
