@@ -50,6 +50,16 @@ async function cost(bytes) {
   return BigInt(quote.winc);
 }
 
+// Turbo's price per GiB, in winc and USD. What a fixed dollar grant is
+// worth in bytes at this moment; the caller records the rate it used.
+async function rate() {
+  const rates = await (await turbo()).getFiatRates();
+  const usd_per_gib = Number(rates?.fiat?.usd);
+  const winc_per_gib = String(rates?.winc || '');
+  if (!Number.isFinite(usd_per_gib) || usd_per_gib <= 0) throw new Error('turbo rate unavailable');
+  return { usd_per_gib, winc_per_gib };
+}
+
 // USD is a courtesy for the confirm dialog; the rate call is best effort and
 // the answer is null when it fails rather than a stale guess.
 async function estimate(bytes) {
@@ -175,5 +185,5 @@ async function verify() {
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 module.exports = {
-  enabled, balance, cost, estimate, putFile, stat, gatewayUrl, verify, ID_RE,
+  enabled, balance, cost, estimate, rate, putFile, stat, gatewayUrl, verify, ID_RE,
 };

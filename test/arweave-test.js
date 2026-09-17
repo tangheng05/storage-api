@@ -85,6 +85,7 @@ arweave.putFile = async ({ filePath, contentType, tags }) => {
   return { id: `${TX.slice(0, 40)}${String(uploads.length).padStart(3, '0')}`, bytes, winc: String(bytes) };
 };
 arweave.stat = async () => 'turbo:confirmed gateway:ok';
+arweave.rate = async () => ({ usd_per_gib: 51.2, winc_per_gib: '1000000000000' });
 
 // S5 never sees the network: putFile hashes for real and "stores" nothing,
 // stat says every CID resolves, fetchBlob fails on demand for the fallback test.
@@ -577,6 +578,14 @@ async function main() {
 
     const del = await request('DELETE', `/documents/${id}`, { headers: UP });
     check('deleting a forever document reports the permanent copy', del.status === 200 && del.json.storage.arweave === `permanent:${r.json.arweave_id}`);
+  }
+
+  // --- the going rate, for dollar grants ---
+  {
+    const noKey = await request('GET', '/media/arweave/rate', { headers: UP });
+    check('the rate needs the arweave key', noKey.status === 401);
+    const r = await request('GET', '/media/arweave/rate', { headers: AR });
+    check('the rate answers USD and winc per GiB', r.status === 200 && r.json.usd_per_gib === 51.2 && r.json.winc_per_gib === '1000000000000');
   }
 
   // --- off ---

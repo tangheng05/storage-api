@@ -320,6 +320,18 @@ const estimateLimiter = rateLimit({
   message: { error: 'Too many permanent-storage requests, try again later' },
 });
 
+// The going price per GiB, for turning a dollar grant into bytes. Same
+// key and budget as the estimate.
+router.get('/arweave/rate', estimateLimiter, requireArweaveKey, async (req, res) => {
+  if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
+  try {
+    return res.json(await arweave.rate());
+  } catch (err) {
+    logger.error({ err: err.message }, 'arweave rate failed');
+    return res.status(502).json({ error: 'arweave_rate_failed' });
+  }
+});
+
 router.get('/:kind/:file/arweave/estimate', estimateLimiter, requireArweaveKey, async (req, res) => {
   if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
   const found = await foreverJob(req, res);

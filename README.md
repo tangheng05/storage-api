@@ -126,6 +126,7 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | POST | `/media/:kind/:file/promote` | queue the S5 push (202); idempotent |
 | POST | `/media/:kind/:file/arweave` | queue the Arweave copy (202); arweave key |
 | GET | `/media/:kind/:file/arweave/estimate` | what that would cost; arweave key |
+| GET | `/media/arweave/rate` | USD and winc per GiB, for dollar grants; arweave key |
 | POST | `/documents/:id/arweave` | permanent copy of a post's text (200, sync); arweave key |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
 | POST | `/documents` | archive raw text, returns its sha256 |
