@@ -78,6 +78,8 @@ function publicFields(job) {
     arweave_state: job.arweave_state,
     arweave_id: job.arweave_id || null,
     arweave_url: job.arweave_id ? arweave.gatewayUrl(job.arweave_id) : null,
+    // The caller tells the author why; a code (arweave_credits_low) or a message.
+    arweave_error: job.arweave_state === 'failed' ? job.arweave_error || null : null,
   };
 }
 

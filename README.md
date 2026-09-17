@@ -140,7 +140,7 @@ States: `uploading → queued → processing → scanning → ready | rejected |
 failed`. `scan_reasons` is populated only on `rejected`. `s5_cid` needs
 `S5_EXPOSE_CID=true` (or a forever job) and is permanent once shown.
 `arweave_state` is `pending → uploading → published | failed`, with
-`arweave_id` and `arweave_url` once published.
+`arweave_id` and `arweave_url` once published, `arweave_error` on `failed`.
 
 ## Limits
 

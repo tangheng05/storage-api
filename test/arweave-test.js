@@ -361,7 +361,7 @@ async function main() {
     let job = await untilState(id, ['published', 'failed']);
     check('a Turbo failure lands in failed with the message', job.arweave_state === 'failed' && job.arweave_error === 'turbo 503');
     const status = await request('GET', `/images/${id}/status`, { headers: UP });
-    check('status shows failed and no id', status.json.arweave_state === 'failed' && status.json.arweave_id === null);
+    check('status shows failed, the reason, and no id', status.json.arweave_state === 'failed' && status.json.arweave_error === 'turbo 503' && status.json.arweave_id === null);
 
     failUpload = null;
     const r = await request('POST', `/media/images/${file}/arweave`, { headers: AR });
