@@ -82,6 +82,15 @@ then.
 A purge failure never fails the delete: the bytes are already gone by then, so
 the right answer is to report it, not to unwind.
 
+### A fresh Forever copy 404s on arweave.net
+
+Normal for minutes to an hour after upload. Turbo confirms and charges at
+once; public gateways only serve an item once its bundle is posted to the
+chain and indexed. The job's `arweave_gateway` field records both answers
+(`turbo:confirmed gateway:status 404`); `turbo:confirmed` or `finalized` is
+the one that means the copy exists. Check
+`https://upload.ardrive.io/v1/tx/<id>/status` if in doubt.
+
 ### Forever media cannot be taken down
 
 A job with an `arweave_id` has a copy on Arweave that nobody can remove, us

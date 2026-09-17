@@ -84,7 +84,7 @@ arweave.putFile = async ({ filePath, contentType, tags }) => {
   uploads.push({ filePath, contentType, tags, bytes });
   return { id: `${TX.slice(0, 40)}${String(uploads.length).padStart(3, '0')}`, bytes, winc: String(bytes) };
 };
-arweave.stat = async () => 'ok';
+arweave.stat = async () => 'turbo:confirmed gateway:ok';
 
 // S5 never sees the network: putFile hashes for real and "stores" nothing,
 // stat says every CID resolves, fetchBlob fails on demand for the fallback test.
@@ -228,7 +228,7 @@ async function main() {
     const job = await untilState(id, ['published', 'failed']);
     check('the upload finished as published', job.arweave_state === 'published');
     check('the id is an Arweave transaction id', arweave.ID_RE.test(job.arweave_id));
-    check('the job records bytes, cost and gateway check', job.arweave_bytes === 17 && job.arweave_winc === '17' && job.arweave_gateway === 'ok');
+    check('the job records bytes, cost and gateway check', job.arweave_bytes === 17 && job.arweave_winc === '17' && job.arweave_gateway === 'turbo:confirmed gateway:ok');
 
     const up = uploads[uploads.length - 1];
     check('the data item carries the S5 CID, the media id and the author',

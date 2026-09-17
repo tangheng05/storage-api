@@ -113,19 +113,44 @@ function gatewayUrl(id, index = 0) {
   return `${base.replace(/\/$/, '')}/${id}`;
 }
 
-// Best effort: a gateway can lag Turbo's cache by seconds. Only reported, never
-// a reason to fail the job -- the money is spent and the id is valid.
+const TURBO_STATUS_URL = 'https://upload.ardrive.io/v1/tx';
+
+/*
+| Where the item stands, as text for the job record. Only reported, never a
+| reason to fail the job: the money is spent and the id is valid.
+|
+| Turbo's own status is the authoritative answer (CONFIRMED means accepted and
+| paid; FINALIZED means on the chain). A public gateway can lag that by
+| minutes to an hour while the bundle is posted and indexed, so a gateway
+| 404 right after upload is normal and says nothing about the copy.
+*/
 async function stat(id) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 15000);
-  try {
-    const res = await fetch(gatewayUrl(id), { method: 'HEAD', signal: ac.signal, redirect: 'follow' });
-    return res.ok ? 'ok' : `status ${res.status}`;
-  } catch (err) {
-    return err.name === 'AbortError' ? 'timeout' : err.message;
-  } finally {
-    clearTimeout(timer);
+  const probe = async (url, init) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000);
+    try {
+      return await fetch(url, { ...init, signal: ac.signal, redirect: 'follow' });
+    } catch (err) {
+      return { ok: false, status: err.name === 'AbortError' ? 'timeout' : err.message };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let turbo = 'unknown';
+  const t = await probe(`${TURBO_STATUS_URL}/${id}/status`, { method: 'GET' });
+  if (t.ok) {
+    try {
+      const body = await t.json();
+      turbo = String(body.status || 'unknown').toLowerCase();
+    } catch {}
+  } else {
+    turbo = `status ${t.status}`;
   }
+
+  const g = await probe(gatewayUrl(id), { method: 'HEAD' });
+  const gateway = g.ok ? 'ok' : `status ${g.status}`;
+  return `turbo:${turbo} gateway:${gateway}`;
 }
 
 // Boot check: a wrong wallet path or an empty wallet should show up in the
