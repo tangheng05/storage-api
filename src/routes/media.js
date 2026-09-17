@@ -309,7 +309,18 @@ async function foreverJob(req, res) {
 
 // What Forever would cost for this file, for the confirm dialog. Never
 // queues anything.
-router.get('/:kind/:file/arweave/estimate', foreverLimiter, requireArweaveKey, async (req, res) => {
+// Its own budget: the confirm dialog calls this before every POST, and the
+// only caller is the main API from one IP, so sharing one would halve the
+// platform's Forever throughput.
+const estimateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: config.ARWEAVE_PER_HOUR,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many permanent-storage requests, try again later' },
+});
+
+router.get('/:kind/:file/arweave/estimate', estimateLimiter, requireArweaveKey, async (req, res) => {
   if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
   const found = await foreverJob(req, res);
   if (!found) return undefined;

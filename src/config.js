@@ -162,8 +162,9 @@ module.exports = {
   // Public gateways for the /cdn fallback. Never the primary: they throttle video.
   ARWEAVE_GATEWAYS: csv(process.env.ARWEAVE_GATEWAYS, 'https://arweave.net'),
   ARWEAVE_TIMEOUT_MS: num(process.env.ARWEAVE_TIMEOUT_MS, 30 * 60 * 1000),
-  // Per IP on the POST. Every accepted call costs money, so the cost attack
-  // in the guideline's §10 is real even for a key holder.
+  // Per IP, per route (the POSTs and the estimate each get this). Every
+  // accepted POST costs money, so the cost attack in the guideline's §10 is
+  // real even for a key holder.
   ARWEAVE_PER_HOUR: num(process.env.ARWEAVE_PER_HOUR, 200),
   ARWEAVE_RECOVER_LIMIT: num(process.env.ARWEAVE_RECOVER_LIMIT, 50),
 

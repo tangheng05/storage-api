@@ -467,6 +467,44 @@ async function main() {
     void file;
   }
 
+  // --- a delete that lands after the job was read, before anything is paid ---
+  {
+    const { id, file } = await makeImage({ bytes: 'deleted mid-flight' });
+    const jobPath = path.join(config.JOBS_DIR, `${id}.json`);
+    const before = uploads.length;
+    // The hash is the last step before the 'uploading' mark; delete right there.
+    const realHash = s5.hashFile;
+    s5.hashFile = async (p) => { await fsp.rm(jobPath, { force: true }); return realHash(p); };
+    await forever.archive(id);
+    s5.hashFile = realHash;
+    check('a job deleted before the upload starts pays nothing', uploads.length === before);
+    check('and is not resurrected', !fs.existsSync(jobPath));
+    void file;
+  }
+
+  // --- boot sweep marks interrupted uploads even with Arweave switched off ---
+  {
+    const { id } = await makeImage({ bytes: 'stuck uploading', extra: { arweave_state: 'uploading' } });
+    config.ARWEAVE_ENABLED = false;
+    forever.recoverOnBoot();
+    await settle();
+    config.ARWEAVE_ENABLED = true;
+    const job = await jobs.get(id);
+    check('with Arweave off, an interrupted upload is still marked failed so it can be deleted',
+      job.arweave_state === 'failed');
+    const del = await request('DELETE', `/images/${id}`, { headers: UP });
+    check('and the delete goes through', del.status === 200);
+  }
+
+  // --- published elsewhere, nothing to push: refused up front ---
+  {
+    const { file } = await makeImage({ onS5: false, extra: { storage_backend: 's3d', mirror_state: 'published', sia_key: 'k' } });
+    const e = await request('GET', `/media/images/${file}/arweave/estimate`, { headers: AR });
+    check('an s3d-published file with no S5 copy is refused by the estimate, not later', e.status === 409 && e.json.error === 'not_on_s5');
+    const p = await request('POST', `/media/images/${file}/arweave`, { headers: AR });
+    check('and by the POST', p.status === 409 && p.json.error === 'not_on_s5');
+  }
+
   // --- a stuck 'pending' can be asked again ---
   {
     const { id, file } = await makeImage({ bytes: 'stuck pending', extra: { arweave_state: 'pending' } });
@@ -527,6 +565,15 @@ async function main() {
     await fsp.writeFile(path.join(config.DOCUMENTS_DIR, `${bad}.json`), 'tampered');
     const b = await request('POST', `/documents/${bad}/arweave`, { headers: AR });
     check('bytes that no longer match the commitment are refused', b.status === 502 && !(await jobs.get(bad)).arweave_id);
+
+    // Two calls at once (a retry after a timeout) pay once.
+    const twice = await makeDoc('{"v":2,"title":"t","body":"race"}');
+    const b2 = uploads.length;
+    const [x, y] = await Promise.all([
+      request('POST', `/documents/${twice}/arweave`, { headers: AR }),
+      request('POST', `/documents/${twice}/arweave`, { headers: AR }),
+    ]);
+    check('concurrent document copies share one upload', x.status === 200 && y.status === 200 && x.json.arweave_id === y.json.arweave_id && uploads.length === b2 + 1);
 
     const del = await request('DELETE', `/documents/${id}`, { headers: UP });
     check('deleting a forever document reports the permanent copy', del.status === 200 && del.json.storage.arweave === `permanent:${r.json.arweave_id}`);

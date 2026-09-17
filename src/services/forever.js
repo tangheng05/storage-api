@@ -25,6 +25,10 @@ const { exists } = require('../utils/fs');
 | retried on its own: every attempt costs credits, so the caller asks again.
 */
 
+// Slot states a push can be retried from. 'skipped' is a file published
+// before S5_TYPES covered its type; 'pending' is a /promote still queued.
+const PUSHABLE = ['deferred', 'failed', 'pending', 'skipped'];
+
 function typeAllowed(mediaType) {
   return config.ARWEAVE_TYPES.includes(mediaType);
 }
@@ -56,6 +60,11 @@ async function refusal(job, { kind } = {}) {
   if (!mirror.targetsS5({ mediaType: job.media_type, visibility: 'public' })) {
     return { status: 409, error: 'not_on_s5', message: 'S5 is the player; Arweave is only ever the second copy' };
   }
+  // Published elsewhere (s3d, before S5 covered its type) with nothing to
+  // retry: the estimate must not quote what the upload cannot do.
+  if (!job.s5_cid && !PUSHABLE.includes(job[mirror.SLOTS.main.state])) {
+    return { status: 409, error: 'not_on_s5', message: 'this file has no S5 copy and no push to retry' };
+  }
   const bytes = await bytesOf(job);
   if (config.ARWEAVE_MAX_BYTES > 0 && bytes > config.ARWEAVE_MAX_BYTES) {
     return { status: 413, error: 'over_permanence_cap', max_bytes: config.ARWEAVE_MAX_BYTES };
@@ -78,10 +87,6 @@ async function existingIdForCid(cid, excludeId) {
   const other = await jobs.findOther(excludeId, (j) => j.s5_cid === cid && j.arweave_id);
   return other ? other.arweave_id : null;
 }
-
-// Slot states a push can be retried from. 'skipped' is a file published
-// before S5_TYPES covered its type; 'pending' is a /promote still queued.
-const PUSHABLE = ['deferred', 'failed', 'pending', 'skipped'];
 
 /*
 | Makes sure the job is on S5, and waits for it.
@@ -155,7 +160,7 @@ async function archive(id) {
 
   const file = mirror.fileFromJob(job);
   if (!file) {
-    await jobs.update(id, { arweave_state: 'failed', arweave_error: 'job has no file' });
+    await jobs.patch(id, { arweave_state: 'failed', arweave_error: 'job has no file' });
     return;
   }
 
@@ -165,7 +170,7 @@ async function archive(id) {
 
     const reused = await existingIdForCid(job.s5_cid, id);
     if (reused) {
-      await jobs.update(id, {
+      await jobs.patch(id, {
         arweave_state: 'published', arweave_id: reused, arweave_error: null, arweave_at: new Date().toISOString(),
       });
       logger.info({ id, cid: job.s5_cid, arweave_id: reused }, 'forever: reused an existing data item');
@@ -181,7 +186,12 @@ async function archive(id) {
 
     // From here a restart can no longer tell whether Turbo charged us, so the
     // boot sweep marks 'uploading' as failed instead of retrying it blind.
-    await jobs.update(id, { arweave_state: 'uploading', arweave_error: null });
+    // Minutes may have passed since the job was read (the publish lane, the
+    // hash): a delete in that window means nothing to pay for.
+    if (!(await jobs.patch(id, { arweave_state: 'uploading', arweave_error: null }))) {
+      logger.warn({ id }, 'forever: media deleted before upload, nothing sent');
+      return;
+    }
 
     const tags = [
       { name: 'App-Name', value: 'Serey' },
@@ -196,13 +206,7 @@ async function archive(id) {
     });
 
     const gateway = await arweave.stat(arweaveId);
-    // Deleted meanwhile: never resurrect the record. The copy exists and was
-    // paid for, and the only honest thing left is to say so loudly.
-    if (!(await jobs.get(id))) {
-      logger.error({ id, cid: job.s5_cid, arweave_id: arweaveId }, 'FOREVER COPY LANDED FOR DELETED MEDIA, it is permanent');
-      return;
-    }
-    await jobs.update(id, {
+    const recorded = await jobs.patch(id, {
       arweave_state: 'published',
       arweave_id: arweaveId,
       arweave_error: null,
@@ -211,12 +215,16 @@ async function archive(id) {
       arweave_winc: winc,
       arweave_gateway: gateway,
     });
+    // Deleted meanwhile: never resurrect the record. The copy exists and was
+    // paid for, and the only honest thing left is to say so loudly.
+    if (!recorded) {
+      logger.error({ id, cid: job.s5_cid, arweave_id: arweaveId }, 'FOREVER COPY LANDED FOR DELETED MEDIA, it is permanent');
+      return;
+    }
     logger.info({ id, cid: job.s5_cid, arweave_id: arweaveId, bytes, winc, gateway }, 'forever: published to arweave');
   } catch (err) {
     logger.error({ id, err: err.message }, 'forever: arweave publish failed');
-    if (await jobs.get(id)) {
-      await jobs.update(id, { arweave_state: 'failed', arweave_error: err.code || err.message });
-    }
+    await jobs.patch(id, { arweave_state: 'failed', arweave_error: err.code || err.message });
   } finally {
     if (source && source.temp) await fsp.rm(source.filePath, { force: true });
   }
@@ -234,8 +242,23 @@ async function archive(id) {
 |
 | The recover-on-boot sweep does not touch documents: nothing is queued here.
 */
-async function archiveDocument({ job, filePath }) {
-  if (job.arweave_id) return { id: job.arweave_id, already: true };
+// One upload per document at a time: the route is synchronous and a retry
+// after a timeout would otherwise pay twice for the same bytes.
+const documentFlights = new Map();
+
+function archiveDocument({ job, filePath }) {
+  if (job.arweave_id) return Promise.resolve({ id: job.arweave_id, already: true });
+  if (documentFlights.has(job.id)) return documentFlights.get(job.id);
+  const flight = archiveDocumentOnce({ job, filePath }).finally(() => documentFlights.delete(job.id));
+  documentFlights.set(job.id, flight);
+  return flight;
+}
+
+async function archiveDocumentOnce({ job, filePath }) {
+  // Re-read: the caller's copy may predate another flight that just finished.
+  const fresh = await jobs.get(job.id);
+  if (!fresh) throw Object.assign(new Error('document deleted'), { code: 'not_found', status: 404 });
+  if (fresh.arweave_id) return { id: fresh.arweave_id, already: true };
 
   const body = await fsp.readFile(filePath);
   const sha256 = crypto.createHash('sha256').update(body).digest('hex');
@@ -263,7 +286,7 @@ async function archiveDocument({ job, filePath }) {
   }
 
   const gateway = await arweave.stat(result.id);
-  await jobs.update(job.id, {
+  const recorded = await jobs.patch(job.id, {
     arweave_state: 'published',
     arweave_id: result.id,
     arweave_error: null,
@@ -272,6 +295,10 @@ async function archiveDocument({ job, filePath }) {
     arweave_winc: result.winc,
     arweave_gateway: gateway,
   });
+  if (!recorded) {
+    logger.error({ id: job.id, sha256, arweave_id: result.id }, 'FOREVER COPY LANDED FOR DELETED DOCUMENT, it is permanent');
+    throw Object.assign(new Error('document deleted during upload'), { code: 'not_found', status: 404 });
+  }
   logger.info({ id: job.id, sha256, arweave_id: result.id, reused: !!other }, 'forever: document published to arweave');
   return { id: result.id, already: false, reused: !!other };
 }
@@ -279,14 +306,17 @@ async function archiveDocument({ job, filePath }) {
 // Accepted, not done: a video takes minutes on Turbo. 'pending' is what the
 // boot sweep re-queues.
 async function enqueue(id) {
-  await jobs.update(id, { arweave_state: 'pending', arweave_error: null });
+  if (!(await jobs.patch(id, { arweave_state: 'pending', arweave_error: null }))) {
+    throw Object.assign(new Error('media deleted'), { code: 'not_found' });
+  }
   queue.push(() => archive(id), queue.ARWEAVE_LANE);
 }
 
 // Boot only, never on a timer: it treats 'uploading' as interrupted, which is
-// only true when nothing is in flight.
+// only true when nothing is in flight. That mark runs whether or not Arweave
+// is still enabled -- a job left 'uploading' refuses every delete, and
+// switching the feature off must not make a takedown impossible.
 function recoverOnBoot() {
-  if (!arweave.enabled()) return;
   const held = jobs.listByState(['ready'])
     .filter((job) => ['pending', 'uploading'].includes(job.arweave_state) && !job.arweave_id);
   if (!held.length) return;
@@ -294,12 +324,13 @@ function recoverOnBoot() {
   held.forEach((job) => {
     if (job.arweave_state === 'uploading') {
       // Cannot know whether the upload landed; a retry could pay twice.
-      jobs.update(job.id, { arweave_state: 'failed', arweave_error: 'interrupted by restart, ask again' })
+      jobs.patch(job.id, { arweave_state: 'failed', arweave_error: 'interrupted by restart, ask again' })
         .catch((err) => logger.error({ id: job.id, err: err.message }, 'forever: could not mark interrupted upload'));
       logger.warn({ id: job.id }, 'forever: upload interrupted by restart, left failed');
     }
   });
 
+  if (!arweave.enabled()) return;
   const pending = held.filter((job) => job.arweave_state === 'pending').slice(0, config.ARWEAVE_RECOVER_LIMIT);
   if (!pending.length) return;
   logger.info({ count: pending.length }, 'forever: requeueing pending arweave uploads');

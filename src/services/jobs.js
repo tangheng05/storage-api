@@ -38,6 +38,17 @@ async function update(id, patch) {
   return next;
 }
 
+// Like update, but never creates: null when the record is gone. For writers
+// that run long after they read the job (an Arweave upload) and must not
+// resurrect one a delete removed in the meantime.
+async function patch(id, patch) {
+  const job = await get(id);
+  if (!job) return null;
+  const next = { ...job, ...patch, updated_at: new Date().toISOString() };
+  await fsp.writeFile(jobPath(id), JSON.stringify(next, null, 2));
+  return next;
+}
+
 async function remove(id) {
   await fsp.rm(jobPath(id), { force: true });
 }
@@ -94,5 +105,5 @@ async function findOther(excludeId, predicate) {
 }
 
 module.exports = {
-  create, get, update, remove, listByState, usedByOther, findOther, ULID_REGEX,
+  create, get, update, patch, remove, listByState, usedByOther, findOther, ULID_REGEX,
 };
