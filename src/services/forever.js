@@ -1,5 +1,6 @@
 const path = require('path');
 const fsp = require('fs/promises');
+const crypto = require('crypto');
 
 const config = require('../config');
 const jobs = require('./jobs');
@@ -221,6 +222,60 @@ async function archive(id) {
   }
 }
 
+/*
+| The text of a Forever blog post.
+|
+| Documents are the deletable archive of a post's canonical bytes, kept off
+| S5 on purpose. Forever is the one case where the author asks for the
+| opposite, so this is a separate path from the media one: no S5, no CID, the
+| bytes are checked against the sha256 the document was committed with. Small
+| (MAX_DOCUMENT_BYTES) and synchronous -- seconds, not minutes -- so the
+| caller gets the id in the same request and can put it on chain at once.
+|
+| The recover-on-boot sweep does not touch documents: nothing is queued here.
+*/
+async function archiveDocument({ job, filePath }) {
+  if (job.arweave_id) return { id: job.arweave_id, already: true };
+
+  const body = await fsp.readFile(filePath);
+  const sha256 = crypto.createHash('sha256').update(body).digest('hex');
+  if (job.sha256 && sha256 !== job.sha256) {
+    throw new Error(`document bytes differ from their commitment (${sha256} vs ${job.sha256})`);
+  }
+
+  // Same bytes already there, under any document: one copy is enough.
+  const other = await jobs.findOther(job.id, (j) => j.media_type === 'document' && j.sha256 === sha256 && j.arweave_id);
+  let result;
+  if (other) {
+    result = { id: other.arweave_id, bytes: body.length, winc: null };
+  } else {
+    await checkCredits(body.length);
+    result = await arweave.putFile({
+      filePath,
+      contentType: 'application/json',
+      tags: [
+        { name: 'App-Name', value: 'Serey' },
+        { name: 'Content-SHA256', value: sha256 },
+        { name: 'Serey-Document-Id', value: job.id },
+        ...(job.owner ? [{ name: 'Serey-Author', value: String(job.owner) }] : []),
+      ],
+    });
+  }
+
+  const gateway = await arweave.stat(result.id);
+  await jobs.update(job.id, {
+    arweave_state: 'published',
+    arweave_id: result.id,
+    arweave_error: null,
+    arweave_at: new Date().toISOString(),
+    arweave_bytes: result.bytes,
+    arweave_winc: result.winc,
+    arweave_gateway: gateway,
+  });
+  logger.info({ id: job.id, sha256, arweave_id: result.id, reused: !!other }, 'forever: document published to arweave');
+  return { id: result.id, already: false, reused: !!other };
+}
+
 // Accepted, not done: a video takes minutes on Turbo. 'pending' is what the
 // boot sweep re-queues.
 async function enqueue(id) {
@@ -252,5 +307,5 @@ function recoverOnBoot() {
 }
 
 module.exports = {
-  refusal, bytesOf, publicFields, enqueue, archive, recoverOnBoot,
+  refusal, bytesOf, publicFields, enqueue, archive, archiveDocument, recoverOnBoot,
 };

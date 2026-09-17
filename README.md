@@ -93,6 +93,11 @@ stays `failed` until asked again: every attempt costs money. An upload
 interrupted by a restart is marked failed too, since a blind retry could pay
 twice.
 
+A blog's text goes too: `POST /documents/:id/arweave` copies a document's
+canonical bytes, checked against the sha256 it was committed with. Same key,
+synchronous (a document is small), idempotent, and the one route that sends
+text anywhere it cannot be deleted from -- the author asked for exactly that.
+
 `DELETE` still removes every copy we hold and reports `arweave: permanent:<id>`
 so the caller can tell the user what did not go. While an upload is in flight
 it answers 409 `arweave_upload_in_progress`: a Turbo upload cannot be called
@@ -121,6 +126,7 @@ unable to delete, so a browser or an auditor can poll without the shared key
 | POST | `/media/:kind/:file/promote` | queue the S5 push (202); idempotent |
 | POST | `/media/:kind/:file/arweave` | queue the Arweave copy (202); arweave key |
 | GET | `/media/:kind/:file/arweave/estimate` | what that would cost; arweave key |
+| POST | `/documents/:id/arweave` | permanent copy of a post's text (200, sync); arweave key |
 | GET | `/cdn/:kind/:file` | resolves a ULID to its CID, proxies the bytes |
 | POST | `/documents` | archive raw text, returns its sha256 |
 | GET | `/documents/:id` | read it back; master key only |

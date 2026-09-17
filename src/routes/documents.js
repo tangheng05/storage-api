@@ -9,8 +9,11 @@ const jobs = require('../services/jobs');
 const mirror = require('../services/mirror');
 const sia = require('../services/sia');
 const logger = require('../services/logger');
-const { requireUploadKey } = require('../middleware/auth');
+const rateLimit = require('express-rate-limit');
+const { requireUploadKey, requireArweaveKey } = require('../middleware/auth');
 const { exists } = require('../utils/fs');
+const forever = require('../services/forever');
+const arweave = require('../services/arweave');
 
 // Text bodies a takedown has to be able to erase. Routed to s3d and never S5
 // (mirror.backendFor), and never served without the master key.
@@ -95,38 +98,79 @@ router.post('/', requireUploadKey, async (req, res, next) => {
   }
 });
 
+// Local copy, restored from s3d and checked against the commitment if disk
+// lost it. Shared by the read and the Forever copy.
+const localDocument = async (req) => {
+  const filePath = pathFor(req.docId);
+  if (await exists(filePath)) return filePath;
+  const key = req.docJob[mirror.SLOTS.main.key];
+  if (!key || !sia.enabled()) return null;
+  await sia.getToFile({ key, filePath });
+  const restored = crypto.createHash('sha256').update(await fsp.readFile(filePath)).digest('hex');
+  if (req.docJob.sha256 && restored !== req.docJob.sha256) {
+    await fsp.rm(filePath, { force: true });
+    logger.error({ id: req.docId, key, expected: req.docJob.sha256, got: restored }, 'restored document does not match its commitment');
+    const err = new Error('restored_document_hash_mismatch');
+    err.status = 502;
+    throw err;
+  }
+  logger.info({ id: req.docId, key }, 'document restored from s3d');
+  return filePath;
+};
+
 router.get('/:id', requireUploadKey, normalizeId, loadDoc, async (req, res, next) => {
   try {
-    const filePath = pathFor(req.docId);
-
-    // Pull it back from s3d if local disk lost it.
-    if (!(await exists(filePath))) {
-      const key = req.docJob[mirror.SLOTS.main.key];
-      if (!key || !sia.enabled()) {
-        return res.status(404).json({ error: 'Not found' });
-      }
-      await sia.getToFile({ key, filePath });
-      // The commitment claims these exact bytes. Serving a restore unchecked
-      // would let a corrupt object answer for a hash it does not match.
-      const restored = crypto.createHash('sha256')
-        .update(await fsp.readFile(filePath)).digest('hex');
-      if (req.docJob.sha256 && restored !== req.docJob.sha256) {
-        await fsp.rm(filePath, { force: true });
-        logger.error(
-          { id: req.docId, key, expected: req.docJob.sha256, got: restored },
-          'restored document does not match its commitment',
-        );
-        return res.status(502).json({ error: 'restored_document_hash_mismatch' });
-      }
-      logger.info({ id: req.docId, key }, 'document restored from s3d');
-    }
+    const filePath = await localDocument(req);
+    if (!filePath) return res.status(404).json({ error: 'Not found' });
 
     res.set('Content-Type', 'application/json; charset=utf-8');
     res.set('Cache-Control', 'no-store');
     res.set('X-Content-Sha256', req.docJob.sha256 || '');
     return res.sendFile(filePath);
   } catch (err) {
+    if (err.status === 502) return res.status(502).json({ error: err.message });
     return next(err);
+  }
+});
+
+/*
+| Forever for text: a permanent copy of a post's canonical bytes.
+|
+| The one route that sends a document anywhere it cannot be deleted from,
+| behind the arweave key like the media routes. Synchronous and idempotent: a
+| document is small, and the caller wants the id in hand before it goes on
+| chain. 200 with the id, whether this call made the copy or an earlier one.
+*/
+const foreverLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: config.ARWEAVE_PER_HOUR,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many permanent-storage requests, try again later' },
+});
+
+router.post('/:id/arweave', foreverLimiter, requireArweaveKey, normalizeId, loadDoc, async (req, res, next) => {
+  if (!arweave.enabled()) return res.status(503).json({ error: 'arweave_not_configured' });
+  const job = req.docJob;
+  if (job.state !== 'ready') return res.status(409).json({ error: 'not_published', state: job.state });
+  try {
+    const filePath = await localDocument(req);
+    if (!filePath) return res.status(409).json({ error: 'local_file_missing' });
+    const { id: arweaveId, already, reused } = await forever.archiveDocument({ job, filePath });
+    return res.json({
+      id: req.docId,
+      sha256: job.sha256,
+      bytes: job.size,
+      arweave_id: arweaveId,
+      arweave_url: arweave.gatewayUrl(arweaveId),
+      already: !!already,
+      reused: !!reused,
+    });
+  } catch (err) {
+    if (err.status === 502) return res.status(502).json({ error: err.message });
+    logger.error({ id: req.docId, err: err.message }, 'forever: document arweave publish failed');
+    const code = err.code || 'arweave_upload_failed';
+    return res.status(code === 'arweave_credits_low' ? 402 : 502).json({ error: code, message: err.message });
   }
 });
 

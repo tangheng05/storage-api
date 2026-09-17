@@ -39,6 +39,7 @@ process.env.IMAGES_DIR = path.join(root, 'images');
 process.env.PRIVATE_IMAGES_DIR = path.join(root, 'private');
 process.env.VIDEOS_DIR = path.join(root, 'videos');
 process.env.THUMBS_DIR = path.join(root, 'thumbs');
+process.env.DOCUMENTS_DIR = path.join(root, 'documents');
 process.env.S5_ENABLED = 'true';
 process.env.S5_NODE_URL = 'http://127.0.0.1:9';
 process.env.S5_AUTH_TOKEN = 'tok';
@@ -47,7 +48,7 @@ process.env.S5_EXPOSE_CID = 'false';
 process.env.SIA_ENABLED = 'false';
 process.env.SCAN_ENABLED = 'false';
 process.env.PUBLIC_BASE_URL = 'http://storage.test';
-for (const d of ['jobs', 'images', 'private', 'videos', 'thumbs']) {
+for (const d of ['jobs', 'images', 'private', 'videos', 'thumbs', 'documents']) {
   fs.mkdirSync(path.join(root, d), { recursive: true });
 }
 fs.writeFileSync(process.env.ARWEAVE_JWK_PATH, '{}');
@@ -480,6 +481,55 @@ async function main() {
     const { file } = await makeImage();
     const r = await request('GET', `/media/images/${file}/arweave/estimate`, { headers: AR });
     check('the estimate carries the rate-limit headers', r.status === 200 && r.headers.get('ratelimit-limit') === String(config.ARWEAVE_PER_HOUR));
+  }
+
+  // --- text: a document's canonical bytes ---
+  {
+    const crypto = require('crypto');
+    const makeDoc = async (text) => {
+      const id = nextId();
+      const body = Buffer.from(text);
+      await fsp.writeFile(path.join(config.DOCUMENTS_DIR, `${id}.json`), body);
+      await jobs.create(id, {
+        state: 'ready', media_type: 'document', visibility: 'private', owner: 'alice',
+        url: `${config.PUBLIC_BASE_URL}/documents/${id}.json`, size: body.length,
+        sha256: crypto.createHash('sha256').update(body).digest('hex'), mirror_state: 'skipped',
+      });
+      return id;
+    };
+
+    const id = await makeDoc('{"v":2,"title":"t","body":"hello"}');
+    const noKey = await request('POST', `/documents/${id}/arweave`, { headers: UP });
+    check('a document copy needs the arweave key', noKey.status === 401);
+
+    const before = uploads.length;
+    const r = await request('POST', `/documents/${id}/arweave`, { headers: AR });
+    check('a document is copied synchronously and answers with the id', r.status === 200 && arweave.ID_RE.test(r.json.arweave_id) && r.json.already === false);
+    const up = uploads[uploads.length - 1];
+    check('as JSON, tagged with its sha256 and author',
+      uploads.length === before + 1 && up.contentType === 'application/json'
+      && up.tags.some((t) => t.name === 'Content-SHA256' && t.value === r.json.sha256)
+      && up.tags.some((t) => t.name === 'Serey-Author' && t.value === 'alice')
+      && !up.tags.some((t) => t.name === 'S5-CID'));
+    const job = await jobs.get(id);
+    check('the job records it', job.arweave_state === 'published' && job.arweave_id === r.json.arweave_id);
+
+    const again = await request('POST', `/documents/${id}/arweave`, { headers: AR });
+    check('asking again is idempotent', again.status === 200 && again.json.already === true && again.json.arweave_id === r.json.arweave_id);
+    check('and uploads nothing', uploads.length === before + 1);
+
+    const twin = await makeDoc('{"v":2,"title":"t","body":"hello"}');
+    const t2 = await request('POST', `/documents/${twin}/arweave`, { headers: AR });
+    check('identical bytes under another document reuse the copy', t2.status === 200 && t2.json.reused === true && t2.json.arweave_id === r.json.arweave_id);
+    check('and pay nothing', uploads.length === before + 1);
+
+    const bad = await makeDoc('{"v":2,"title":"t","body":"original"}');
+    await fsp.writeFile(path.join(config.DOCUMENTS_DIR, `${bad}.json`), 'tampered');
+    const b = await request('POST', `/documents/${bad}/arweave`, { headers: AR });
+    check('bytes that no longer match the commitment are refused', b.status === 502 && !(await jobs.get(bad)).arweave_id);
+
+    const del = await request('DELETE', `/documents/${id}`, { headers: UP });
+    check('deleting a forever document reports the permanent copy', del.status === 200 && del.json.storage.arweave === `permanent:${r.json.arweave_id}`);
   }
 
   // --- off ---
