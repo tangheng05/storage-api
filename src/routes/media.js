@@ -181,10 +181,21 @@ async function buildUrlFor(id, kind, visibility, file) {
   }
   try {
     const job = await jobs.get(id);
-    // Only if actually published, so flipping back to public can't silently move onto local delivery.
-    if (job && job.mirror_state === 'published') {
-      const url = mirror.publicUrl(job.storage_backend, kind, file);
-      if (url) return url;
+    if (job) {
+      // Only if actually published, so flipping back to public can't silently move onto local delivery.
+      if (job.mirror_state === 'published') {
+        const url = mirror.publicUrl(job.storage_backend, kind, file);
+        if (url) return url;
+      }
+      // Awaiting /promote, or a push that failed and will be retried. The
+      // upload already handed out the /cdn URL, which serves from local disk
+      // until the CID lands, so this has to say the same thing: the main API
+      // rewrites the post with whatever comes back here, and it asks before
+      // it promotes. Answering with the local path here is how every video
+      // published from the web lost its /cdn URL.
+      if (mirror.targetsS5({ mediaType: job.media_type, visibility: 'public' })) {
+        return mirror.publicUrl('s5', kind, file);
+      }
     }
   } catch {
     // Fall through to the local URL, which always works.

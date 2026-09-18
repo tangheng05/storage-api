@@ -486,6 +486,16 @@ async function main() {
   ok('and /cdn serves it from local disk',
     (await call('GET', `/cdn/images/${ULID_D1}.webp`)).status === 200);
 
+  // The main API confirms visibility on publish and rewrites the post with the
+  // URL that comes back -- and it does that before it promotes. While the job
+  // is still deferred, the answer has to be the /cdn URL the upload gave out,
+  // or every published post ends up on the local path.
+  const confirmed = await call('POST', `/media/images/${ULID_D1}.webp/visibility`, { visibility: 'public' });
+  ok('confirming public on a deferred job succeeds', confirmed.status === 200);
+  ok('and echoes the CDN URL, not the local path',
+    JSON.parse(confirmed.text).url === draftUrl);
+  ok('which leaves the slot deferred', (await jobs.get(ULID_D1)).mirror_state === 'deferred');
+
   // 202, not 200: the backend push can take minutes for a video, so holding the
   // request open would time the caller out before it finished.
   const promoted = await call('POST', `/media/images/${ULID_D1}.webp/promote`);
