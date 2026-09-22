@@ -68,7 +68,11 @@ function makeRouter(kind) {
       }
       if (!job) return res.status(404).json({ error: 'Not found' });
       return res.json({
-        ...pick(job, ['id', 'state', 'url', ...fields, 'error', 'filename']),
+        ...pick(job, ['id', 'state', 'url', ...fields, 'error', 'filename', 'community_id']),
+        // The stored size, not the upload: everything is re-encoded on the
+        // way in (the upload size until then). What the main API charges a
+        // community's quota for.
+        bytes: await forever.bytesOf(job),
         s5_cid: mirror.publicCid(job),
         scan_reasons: scan.publicReasons(job),
         scan_message: scan.publicMessage(job),

@@ -126,6 +126,10 @@ const tusServer = new Server({
       size: upload.size,
       upload_token: uploadToken,
       owner: meta.owner || null,
+      // Which community's storage this counts against. Informational: the
+      // main API keeps the quota and decides at publish; this is for audit
+      // and backfill only.
+      community_id: /^\d{1,12}$/.test(String(meta.community_id || '')) ? Number(meta.community_id) : null,
       // Permanent for public media: it goes to S5, whose CIDs cannot be
       // revoked, so it can never become premium later (media.js refuses
       // that flip).
