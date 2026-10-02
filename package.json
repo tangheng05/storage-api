@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js && node test/s5-purge-test.js && node test/cdn-purge-test.js && node test/document-test.js && node test/archive-test.js && node test/arweave-test.js && node test/community-storage-test.js && node test/metadata-strip-test.js",
+    "test": "node test/s5-scan-test.js && node test/s3d-test.js && node test/s5-blob-test.js && node test/queue-test.js && node test/s5-purge-test.js && node test/cdn-purge-test.js && node test/document-test.js && node test/archive-test.js && node test/arweave-test.js && node test/community-storage-test.js && node test/metadata-strip-test.js && node test/random-id-test.js",
     "test:s5": "node test/s5-scan-test.js",
     "test:s3d": "node test/s3d-test.js",
     "test:blob": "node test/s5-blob-test.js",
@@ -19,7 +19,8 @@
     "test:cdn": "node test/cdn-purge-test.js",
     "test:arweave": "node test/arweave-test.js",
     "test:community-storage": "node test/community-storage-test.js",
-    "test:strip": "node test/metadata-strip-test.js"
+    "test:strip": "node test/metadata-strip-test.js",
+    "test:ids": "node test/random-id-test.js"
   },
   "repository": {
     "type": "git",
@@ -44,7 +45,6 @@
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "sharp": "^0.34.5",
-    "ulid": "^2.3.0",
     "yazl": "^3.3.1"
   },
   "devDependencies": {

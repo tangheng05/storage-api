@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { checkDiskSpace } = require('./utils/disk');
 const { Server } = require('@tus/server');
 const { FileStore } = require('@tus/file-store');
-const { ulid } = require('ulid');
+const { randomId } = require('./utils/id');
 const config = require('./config');
 const { isAuthorized, matchesUploadToken } = require('./middleware/auth');
 const jobs = require('./services/jobs');
@@ -65,7 +65,7 @@ const tusServer = new Server({
     directory: config.TUS_DIR,
     expirationPeriodInMilliseconds: config.UPLOAD_EXPIRY_MS,
   }),
-  namingFunction: () => ulid(),
+  namingFunction: () => randomId(),
   generateUrl(req, { proto, host, path: p, id }) {
     return `${config.PUBLIC_BASE_URL}${p}/${id}`;
   },

@@ -10,6 +10,7 @@ const uploadsRouter = require('./routes/uploads');
 const mediaRouter = require('./routes/media');
 const cdnRouter = require('./routes/cdn');
 const documentsRouter = require('./routes/documents');
+const { NO_MTIME, nameEtag } = require('./utils/static_headers');
 const archiveRouter = require('./routes/archive');
 const blobRouter = require('./routes/blob');
 const moderationRouter = require('./routes/moderation');
@@ -135,10 +136,16 @@ app.use('/audio', uploadsRouter('audio'));
 app.use('/images', uploadsRouter('images'));
 
 // Local/dev fallback: in production nginx serves these directly from disk.
-app.use('/videos', express.static(config.VIDEOS_DIR, { immutable: true, maxAge: '365d' }));
-app.use('/thumbnails', express.static(config.THUMBS_DIR, { immutable: true, maxAge: '365d' }));
-app.use('/audio', express.static(config.AUDIO_DIR, { immutable: true, maxAge: '365d' }));
-app.use('/images', express.static(config.IMAGES_DIR, { immutable: true, maxAge: '365d' }));
+const staticOptions = {
+  immutable: true,
+  maxAge: '365d',
+  ...NO_MTIME,
+  setHeaders: (res, filePath) => res.setHeader('ETag', nameEtag(filePath)),
+};
+app.use('/videos', express.static(config.VIDEOS_DIR, staticOptions));
+app.use('/thumbnails', express.static(config.THUMBS_DIR, staticOptions));
+app.use('/audio', express.static(config.AUDIO_DIR, staticOptions));
+app.use('/images', express.static(config.IMAGES_DIR, staticOptions));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 // eslint-disable-next-line no-unused-vars

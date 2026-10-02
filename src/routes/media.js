@@ -14,6 +14,7 @@ const queue = require('../services/queue');
 const forever = require('../services/forever');
 const arweave = require('../services/arweave');
 const { exists } = require('../utils/fs');
+const { NO_MTIME } = require('../utils/static_headers');
 
 const router = express.Router();
 
@@ -438,6 +439,7 @@ router.get('/:kind/:file', async (req, res) => {
 
   // Dev fallback. sendFile handles Range itself, which matters for seeking.
   return res.sendFile(filePath, {
+    ...NO_MTIME,
     headers: { 'Cache-Control': 'private, no-store' },
   });
 });

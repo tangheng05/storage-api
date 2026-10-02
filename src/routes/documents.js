@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
-const { ulid } = require('ulid');
+const { randomId } = require('../utils/id');
 
 const config = require('../config');
 const jobs = require('../services/jobs');
@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const rateLimit = require('express-rate-limit');
 const { requireUploadKey, requireArweaveKey } = require('../middleware/auth');
 const { exists } = require('../utils/fs');
+const { NO_MTIME } = require('../utils/static_headers');
 const forever = require('../services/forever');
 const arweave = require('../services/arweave');
 
@@ -53,7 +54,7 @@ router.post('/', requireUploadKey, async (req, res, next) => {
       });
     }
 
-    const id = ulid();
+    const id = randomId();
     const file = fileFor(id);
     const filePath = pathFor(id);
     // Over the exact bytes written, so a restore verifies byte for byte.
@@ -126,7 +127,7 @@ router.get('/:id', requireUploadKey, normalizeId, loadDoc, async (req, res, next
     res.set('Content-Type', 'application/json; charset=utf-8');
     res.set('Cache-Control', 'no-store');
     res.set('X-Content-Sha256', req.docJob.sha256 || '');
-    return res.sendFile(filePath);
+    return res.sendFile(filePath, NO_MTIME);
   } catch (err) {
     if (err.status === 502) return res.status(502).json({ error: err.message });
     return next(err);

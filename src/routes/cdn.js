@@ -4,6 +4,7 @@ const config = require('../config');
 const resolve = require('../services/resolve');
 const arweave = require('../services/arweave');
 const logger = require('../services/logger');
+const { NO_MTIME, nameEtag } = require('../utils/static_headers');
 
 const router = express.Router();
 
@@ -41,7 +42,10 @@ router.all('/:kind/:file', async (req, res) => {
       if (bytes !== null) res.set('Content-Length', String(bytes));
       return res.end();
     }
-    return res.sendFile(found.localPath);
+    return res.sendFile(found.localPath, {
+      ...NO_MTIME,
+      headers: { ETag: nameEtag(found.localPath) },
+    });
   }
 
   let opened;
