@@ -5,6 +5,7 @@ const jobs = require('./jobs');
 const queue = require('./queue');
 const ffmpeg = require('./ffmpeg');
 const image = require('./image');
+const metadata = require('./metadata');
 const mirror = require('./mirror');
 const scan = require('./scan');
 const logger = require('./logger');
@@ -13,6 +14,7 @@ const { exists } = require('../utils/fs');
 const VIDEO_CODECS = ['h264', 'hevc', 'vp8', 'vp9', 'av1'];
 const TRANSCODE_CODECS = ['hevc'];
 const WEBM_CODECS = ['vp8', 'vp9', 'av1'];
+const WEBM_AUDIO_CODECS = ['opus', 'vorbis'];
 
 // Two stages on two lanes: `convert` writes the published form into a PENDING
 // dir nothing serves; `finalize` scans it and only on a clean verdict moves it
@@ -64,7 +66,7 @@ async function withOneRetry(id, fn) {
 
 // --- Stage 1: convert into the pending dir ---
 
-async function convertVideo(id, src, probe) {
+async function convertVideo(id, src, probe, strip) {
   const videoStream = (probe.streams || []).find((s) => s.codec_type === 'video');
   const duration = parseFloat((probe.format && probe.format.duration) || '0');
   if (!videoStream) throw Object.assign(new Error('no_video_stream'), { code: 'no_video_stream' });
@@ -83,13 +85,19 @@ async function convertVideo(id, src, probe) {
   const pendingPath = path.join(config.PENDING_VIDEOS_DIR, `${id}${ext}`);
   const tmpPath = path.join(config.PENDING_VIDEOS_DIR, `.${id}.tmp${ext}`);
 
-  if (isWebm) {
+  if (isWebm && strip.stripMetadata) {
+    const audioStream = (probe.streams || []).find((s) => s.codec_type === 'audio');
+    const container = !audioStream || WEBM_AUDIO_CODECS.includes(audioStream.codec_name)
+      ? 'webm'
+      : 'matroska';
+    await withOneRetry(id, () => ffmpeg.remuxWebm(src, tmpPath, { ...strip, container }));
+  } else if (isWebm) {
     await fsp.copyFile(src, tmpPath);
   } else if (needsTranscode) {
     await jobs.update(id, { processing_mode: 'transcode' });
-    await withOneRetry(id, () => ffmpeg.transcodeToH264(src, tmpPath));
+    await withOneRetry(id, () => ffmpeg.transcodeToH264(src, tmpPath, strip));
   } else {
-    await withOneRetry(id, () => ffmpeg.remuxToMp4(src, tmpPath));
+    await withOneRetry(id, () => ffmpeg.remuxToMp4(src, tmpPath, strip));
   }
   await fsp.rename(tmpPath, pendingPath);
 
@@ -113,7 +121,7 @@ async function convertVideo(id, src, probe) {
   };
 }
 
-async function convertAudio(id, src, probe) {
+async function convertAudio(id, src, probe, strip) {
   const duration = parseFloat((probe.format && probe.format.duration) || '0');
   const audioStream = (probe.streams || []).find((s) => s.codec_type === 'audio');
   if (!audioStream) throw Object.assign(new Error('no_audio_stream'), { code: 'no_audio_stream' });
@@ -124,7 +132,7 @@ async function convertAudio(id, src, probe) {
   const ext = '.m4a';
   const pendingPath = path.join(config.PENDING_AUDIO_DIR, `${id}${ext}`);
   const tmpPath = path.join(config.PENDING_AUDIO_DIR, `.${id}.tmp${ext}`);
-  await withOneRetry(id, () => ffmpeg.transcodeToAac(src, tmpPath));
+  await withOneRetry(id, () => ffmpeg.transcodeToAac(src, tmpPath, strip));
   await fsp.rename(tmpPath, pendingPath);
 
   return { pending_file: `${id}${ext}`, pending_thumb: null, duration_sec: Math.round(duration) };
@@ -375,6 +383,9 @@ async function convert(id) {
     const job = await jobs.get(id);
     await jobs.update(id, { state: 'processing' });
 
+    // Set for anonymous accounts' uploads (see src/tus.js).
+    const strip = { stripMetadata: Boolean(job && job.strip_metadata) };
+
     let meta;
     if (job && job.media_type === 'image') {
       let probe;
@@ -392,8 +403,20 @@ async function convert(id) {
         throw Object.assign(new Error('not_a_media_file'), { code: 'not_a_media_file' });
       }
       meta = job && job.media_type === 'audio'
-        ? await convertAudio(id, src, probe)
-        : await convertVideo(id, src, probe);
+        ? await convertAudio(id, src, probe, strip)
+        : await convertVideo(id, src, probe, strip);
+    }
+
+    // sharp drops image metadata on every write; ffmpeg only when told to.
+    // Checked rather than assumed: a leaked location cannot be recalled from S5.
+    if (strip.stripMetadata) {
+      const converted = { ...job, ...meta };
+      try {
+        await metadata.assertStripped(pendingPaths(converted).file, job.media_type);
+      } catch (err) {
+        await discardPending(converted).catch(() => {});
+        throw err;
+      }
     }
 
     // State first: a crash between deleting the source and recording the new
