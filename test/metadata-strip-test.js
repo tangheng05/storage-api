@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
 | Metadata strip test: node test/metadata-strip-test.js (no framework). Proves
-| an anonymous account's upload cannot carry its GPS position, device or
+| no account's upload cannot carry its GPS position, device or
 | capture time to S5: the tus flag lands on the job, ffmpeg drops the tags
 | when it is set, sharp drops image metadata always, and convert() fails a
 | flagged job whose output still carries them. Needs ffmpeg/ffprobe on PATH
@@ -128,10 +128,12 @@ const rejects = async (fn) => {
   };
   ok('strip_metadata=true is recorded on the job',
     (await create('01M3STR1PTESTTESTTESTTESAA', { strip_metadata: 'true' })).strip_metadata === true);
-  ok('an absent flag leaves the job as before',
-    (await create('01M3STR1PTESTTESTTESTTESAB', {})).strip_metadata === undefined);
-  ok('a value that is not a yes is ignored',
-    (await create('01M3STR1PTESTTESTTESTTESAC', { strip_metadata: 'no' })).strip_metadata === undefined);
+  ok('an absent flag strips too, so no client can forget it',
+    (await create('01M3STR1PTESTTESTTESTTESAB', {})).strip_metadata === true);
+  ok('an explicit no opts out',
+    (await create('01M3STR1PTESTTESTTESTTESAC', { strip_metadata: 'false' })).strip_metadata === undefined);
+  ok('an unrecognised value still strips',
+    (await create('01M3STR1PTESTTESTTESTTESAD', { strip_metadata: 'maybe' })).strip_metadata === true);
 
   // --- images: sharp drops everything, for every upload ---
 
