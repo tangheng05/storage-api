@@ -54,6 +54,7 @@ const ALLOWED_IMAGE_EXT = [
 ];
 
 const FLAG_VALUES = new Set(['true', '1', 'yes']);
+const OFF_VALUES = new Set(['false', '0', 'no']);
 
 const STATUS_PATHS = { video: 'videos', audio: 'audio', image: 'images' };
 
@@ -140,12 +141,13 @@ const tusServer = new Server({
       defer_publish: FLAG_VALUES.has(String(meta.defer_publish || '').toLowerCase())
         ? true
         : undefined,
-      // Set by the web app for anonymous accounts: location, device and
-      // capture-time tags are dropped from video/audio and the result is
-      // checked before publishing. Images lose theirs regardless (sharp).
-      strip_metadata: FLAG_VALUES.has(String(meta.strip_metadata || '').toLowerCase())
-        ? true
-        : undefined,
+      // On for every upload: location, device and capture-time tags are
+      // dropped from video/audio and the result is checked before publishing.
+      // Images lose theirs regardless (sharp). Only an explicit false/0/no
+      // opts out, so a client that never sends the flag is still covered.
+      strip_metadata: OFF_VALUES.has(String(meta.strip_metadata || '').toLowerCase())
+        ? undefined
+        : true,
     });
     res.setHeader('X-Upload-Token', uploadToken);
     return res;
