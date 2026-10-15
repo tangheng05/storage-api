@@ -131,6 +131,9 @@ module.exports = {
   S5_BLOB_DELETE_ENABLED: process.env.S5_BLOB_DELETE_ENABLED !== 'false',
   // A CID can't be withdrawn once shown, so this stays off until exposing it is deliberate.
   S5_EXPOSE_CID: process.env.S5_EXPOSE_CID === 'true',
+  // GET /media/cids: lets the main API ask for the CIDs of public media, for the
+  // explorer's proof page. Off until someone decides readers may see a CID.
+  S5_CID_LOOKUP_ENABLED: process.env.S5_CID_LOOKUP_ENABLED === 'true',
 
   // S5's own blobs, read back out of s3d for the node and its peers: s3d refuses a query-signed (presigned-URL) request as
   // anonymous, which is how S5 reads its store, so cdnUrls in the node's config.toml is set to point here instead.

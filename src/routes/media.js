@@ -6,7 +6,7 @@ const rateLimit = require('express-rate-limit');
 const config = require('../config');
 const jobs = require('../services/jobs');
 const logger = require('../services/logger');
-const { requireUploadKey, requireArweaveKey } = require('../middleware/auth');
+const { requireUploadKey, requireArweaveKey, isAuthorized } = require('../middleware/auth');
 const { verify } = require('../utils/signed_url');
 const sia = require('../services/sia');
 const mirror = require('../services/mirror');
@@ -330,6 +330,54 @@ const estimateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many permanent-storage requests, try again later' },
+});
+
+/*
+| The CIDs of up to CID_LOOKUP_MAX public media ids, for the main API's
+| explorer proof. Upload key only, and off until S5_CID_LOOKUP_ENABLED: a CID
+| shown to a reader is a fetch address that cannot be recalled.
+|
+| Read from the live job on every call, with no cache, so a deleted or premium
+| file is simply absent -- the same answer as an id that never existed.
+*/
+const CID_LOOKUP_MAX = 50;
+
+// Only wrong guesses are throttled; the main API's own calls never are.
+const cidKeyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  skip: (req) => isAuthorized(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+router.get('/cids', cidKeyLimiter, requireUploadKey, async (req, res) => {
+  if (!config.S5_CID_LOOKUP_ENABLED) {
+    return res.status(503).json({ error: 'cid_lookup_disabled' });
+  }
+  const ids = [...new Set(String(req.query.ids || '').split(',').map((s) => s.trim()).filter(Boolean))];
+  if (!ids.length || ids.length > CID_LOOKUP_MAX || ids.some((id) => !jobs.ULID_REGEX.test(id))) {
+    return res.status(400).json({ error: `ids must be 1 to ${CID_LOOKUP_MAX} comma-separated media ids` });
+  }
+
+  const rows = await Promise.all(ids.map(async (id) => {
+    try {
+      const job = await jobs.get(id);
+      if (!job || job.state !== 'ready' || job.visibility === 'private') return null;
+      if (!job.s5_cid && !job.s5_thumb_cid) return null;
+      return [id, {
+        kind: mirror.kindFor(job.media_type),
+        s5_cid: job.s5_cid || null,
+        s5_thumb_cid: job.s5_thumb_cid || null,
+      }];
+    } catch (err) {
+      // One unreadable record must not hide the rest of the batch.
+      logger.error({ id, err: err.message }, 'cid lookup: job unreadable');
+      return null;
+    }
+  }));
+  return res.json({ cids: Object.fromEntries(rows.filter(Boolean)) });
 });
 
 // The going price per GiB, for turning a dollar grant into bytes. Same
